@@ -1,8 +1,10 @@
 import { Router } from 'express';
-import { execute, queryOne } from '../db/index.js';
+import crypto from 'node:crypto';
+import { execute, queryOne, queryAll } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validationError, conflict } from '../middleware/error-handler.js';
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_TOKEN, PUBLIC_URL } from '../config.js';
+import { buildManager } from '../engine/build-manager.js';
 
 const router = Router();
 
@@ -73,6 +75,53 @@ router.get('/callback', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// POST /integrations/github/webhook (public webhook endpoint from GitHub)
+router.post('/webhook', async (req, res) => {
+  const event = req.headers['x-github-event'];
+  if (event !== 'push') {
+    return res.status(200).json({ received: true, ignored: `Event ${event} not handled` });
+  }
+
+  const { repository, ref, head_commit } = req.body || {};
+  if (!repository?.full_name || !ref) {
+    return res.status(400).json({ error: 'Invalid push payload' });
+  }
+
+  const branch = ref.replace('refs/heads/', '');
+  const repoName = repository.full_name;
+
+  // Find any service tracking this repo and branch with auto_deploy enabled
+  const matchingServices = queryAll(`
+    SELECT s.id, s.name, s.environment_id 
+    FROM services s
+    JOIN service_settings ss ON ss.service_id = s.id
+    WHERE (s.source_repo = ? OR s.source_repo = ?) 
+      AND (s.source_branch = ? OR ss.branch = ? OR (s.source_branch IS NULL AND ? = 'main'))
+      AND ss.auto_deploy = 1
+  `, repoName, repository.name, branch, branch, branch);
+
+  for (const srv of matchingServices) {
+    const deploymentId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const now = new Date().toISOString();
+
+    execute(`
+      INSERT INTO deployments (id, service_id, service_name, environment_id, state, trigger, commit_sha, commit_message, commit_author, commit_branch, created_at)
+      VALUES (?, ?, ?, ?, 'queued', 'webhook', ?, ?, ?, ?, ?)
+    `, deploymentId, srv.id, srv.name, srv.environment_id,
+      head_commit?.id || null, head_commit?.message || 'Automatic push deployment',
+      head_commit?.author?.name || 'GitHub', branch, now);
+
+    buildManager.buildAndDeploy(srv.id, deploymentId).catch(err => {
+      console.error(`[Webhook Deploy Error] Service ${srv.name}:`, err.message);
+    });
+  }
+
+  return res.status(200).json({
+    triggered: matchingServices.length,
+    services: matchingServices.map(s => s.name)
+  });
 });
 
 // All endpoints below require authentication

@@ -24,6 +24,7 @@ export function initDb() {
   const db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA journal_mode = WAL;');
+  db.exec('PRAGMA busy_timeout = 5000;');
 
   const schemaPath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'schema.sql');
   const schemaSql = fs.readFileSync(schemaPath, 'utf-8');

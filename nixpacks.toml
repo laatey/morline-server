@@ -1,6 +1,6 @@
 # Railway Nixpacks Configuration for Morline Backend
 [phases.setup]
-nixPkgs = ["nodejs_20", "cloudflared", "git"]
+nixPkgs = ["nodejs_22", "cloudflared", "git"]
 
 [phases.install]
 cmds = ["npm ci --omit=dev"]
