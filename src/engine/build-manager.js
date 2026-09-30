@@ -182,7 +182,7 @@ server.listen(port, '0.0.0.0', () => {
     ctx.log('info', `[Build] Preparing build in workspace ${ctx.cwd}`);
 
     // 1. Source
-    if (service.source_type === 'github' && service.source_repo) {
+    if ((service.source_type === 'github' || service.source_type === 'repo') && service.source_repo) {
       await this._syncGithub(ctx, service);
     } else if (this._isEmptyWorkspace(ctx.cwd)) {
       this.seedTemplateFiles(serviceId, service.source_template_id, service.name);
@@ -470,7 +470,12 @@ server.listen(port, '0.0.0.0', () => {
     const queryAll = dbModule.queryAll;
     if (typeof queryAll !== 'function') return {};
     try {
-      const rows = queryAll('SELECT key, value FROM service_variables WHERE service_id = ?', serviceId);
+      let rows = [];
+      try {
+        rows = queryAll("SELECT key, value FROM variables WHERE scope_type = 'service' AND scope_id = ?", serviceId);
+      } catch {
+        rows = queryAll('SELECT key, value FROM service_variables WHERE service_id = ?', serviceId);
+      }
       return Object.fromEntries(rows.map((r) => [r.key, String(r.value ?? '')]));
     } catch {
       return {};
