@@ -298,9 +298,85 @@ server.listen(port, () => {
         try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')); } catch (e) {}
       }
 
-      // 4a. Prefer package.json scripts.start (covers "node dist/index.js", etc.)
-      if (pkg?.scripts?.start) {
+      // 4a. Prefer package.json scripts.start if it exists and is NOT a dev command
+      if (pkg?.scripts?.start && !pkg.scripts.start.includes('react-scripts start')) {
         startCommand = 'npm start';
+      }
+
+      // 4b. Detect Static Single Page Applications (Vite, React, Vue, Svelte, static HTML)
+      // If index.html is in dist/, build/, out/, or public/ and no backend start script was defined:
+      const candidateStaticDirs = ['dist', 'build', 'out', 'public'];
+      const foundStaticDir = candidateStaticDirs.find(d => fs.existsSync(path.join(cwd, d, 'index.html')));
+
+      if (foundStaticDir && (!pkg?.scripts?.start || startCommand === 'npm start')) {
+        // Check if there is an actual backend JS file in dist (like NestJS/TypeScript backend)
+        const hasBackendEntryInStaticDir = ['server.js', 'index.js', 'main.js', 'app.js'].some(f => {
+          const p = path.join(cwd, foundStaticDir, f);
+          return fs.existsSync(p) && !fs.statSync(p).isDirectory();
+        });
+
+        // If it's a frontend (e.g. Vite outputs index.html + assets/) and not a backend:
+        const isViteOrFrontend = Boolean(pkg?.devDependencies?.vite || pkg?.dependencies?.vite || pkg?.scripts?.build?.includes('vite') || !hasBackendEntryInStaticDir);
+
+        if (isViteOrFrontend) {
+          const staticServerScript = `
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const port = parseInt(process.env.PORT || '3000', 10);
+const staticDir = path.join(__dirname, '${foundStaticDir}');
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm'
+};
+const server = http.createServer((req, res) => {
+  let urlPath = decodeURIComponent(req.url.split('?')[0]);
+  let filePath = path.join(staticDir, urlPath);
+  if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+    filePath = path.join(filePath, 'index.html');
+  }
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    filePath = path.join(staticDir, 'index.html'); // SPA client-side routing fallback
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  const contentType = mimeTypes[ext] || 'application/octet-stream';
+  fs.readFile(filePath, (err, content) => {
+    if (err) { res.writeHead(500); res.end('Error loading asset'); return; }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000'
+    });
+    res.end(content);
+  });
+});
+server.listen(port, '0.0.0.0', () => {
+  console.log('[Morline Static Server] Serving ${foundStaticDir} on http://0.0.0.0:' + port);
+});
+`.trim();
+
+          const scriptPath = path.join(cwd, '_morline_server.cjs');
+          fs.writeFileSync(scriptPath, staticServerScript, 'utf-8');
+          startCommand = 'node _morline_server.cjs';
+          logManager.appendLog({
+            deploymentId, serviceId, serviceName: service.name, environmentId: service.environment_id,
+            level: 'info',
+            message: `[Deploy] Detected static web application in "${foundStaticDir}/" — configured production static server`
+          });
+        }
       }
 
       // 4b. For TypeScript projects: check tsconfig outDir to find compiled entry point
