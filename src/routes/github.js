@@ -47,7 +47,10 @@ router.get('/callback', async (req, res, next) => {
         }
       }
 
-      const targetTeamId = teamId || queryOne('SELECT id FROM teams ORDER BY created_at ASC')?.id || 'team_default';
+      const targetTeamId = teamId;
+      if (!targetTeamId) {
+        return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent('Missing teamId in GitHub installation callback state')}`);
+      }
       const now = new Date().toISOString();
 
       execute(`
@@ -184,7 +187,7 @@ async function getTeamToken(teamId) {
     const instToken = await getInstallationToken(row.installation_id);
     if (instToken) return instToken;
   }
-  return row?.access_token || GITHUB_TOKEN || null;
+  return row?.access_token || null;
 }
 
 // GET /integrations/github
@@ -196,26 +199,6 @@ router.get('/', async (req, res, next) => {
     let row = queryOne('SELECT * FROM github_integration WHERE team_id = ?', teamId);
     let connected = Boolean(row && row.connected && (row.access_token || row.installation_id));
     let account = row?.account || null;
-
-    // If not directly recorded for this team, check if there's already an active GitHub App installation
-    if (!connected && GITHUB_APP_ID && GITHUB_PRIVATE_KEY) {
-      const installations = await listAppInstallations();
-      if (installations.length > 0) {
-        const inst = installations[0];
-        account = inst.account?.login || 'GitHub Account';
-        const now = new Date().toISOString();
-        execute(`
-          INSERT INTO github_integration (team_id, account, install_url, installation_id, connected, connected_at)
-          VALUES (?, ?, ?, ?, 1, ?)
-          ON CONFLICT(team_id) DO UPDATE SET
-            account = excluded.account,
-            installation_id = excluded.installation_id,
-            connected = 1,
-            connected_at = excluded.connected_at
-        `, teamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, inst.id, now);
-        connected = true;
-      }
-    }
 
     let installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
     if (!GITHUB_APP_NAME && GITHUB_CLIENT_ID) {
@@ -256,11 +239,10 @@ router.get('/repos', async (req, res, next) => {
 
     if (row?.installation_id) {
       rawRepos = await listInstallationRepositories(row.installation_id);
-    } else if (row?.access_token || GITHUB_TOKEN) {
-      const token = row?.access_token || GITHUB_TOKEN;
+    } else if (row?.access_token) {
       const ghRes = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${row.access_token}`,
           'User-Agent': 'Morline-Server',
           'Accept': 'application/vnd.github+json'
         }
@@ -269,13 +251,10 @@ router.get('/repos', async (req, res, next) => {
         rawRepos = await ghRes.json();
       }
     } else {
-      // Check if any app installations exist on account
-      const installations = await listAppInstallations();
-      if (installations.length > 0) {
-        rawRepos = await listInstallationRepositories(installations[0].id);
-      } else {
-        throw conflict('GitHub account is not connected for this team. Please connect your GitHub account.', 'github_not_connected');
-      }
+      return res.json({
+        data: [],
+        nextCursor: null
+      });
     }
 
     const repos = rawRepos.map((r) => ({

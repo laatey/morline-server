@@ -53,6 +53,18 @@ function applyMigrations(db) {
   if (!githubCols.includes('installation_id')) {
     db.exec('ALTER TABLE github_integration ADD COLUMN installation_id INTEGER;');
   }
+  // Clean up duplicate github_integration rows that were auto-propagated to multiple teams
+  try {
+    db.exec(`
+      DELETE FROM github_integration 
+      WHERE installation_id IS NOT NULL 
+        AND rowid NOT IN (
+          SELECT MIN(rowid) FROM github_integration GROUP BY installation_id
+        );
+    `);
+  } catch (err) {
+    console.error('Error cleaning up duplicate github integrations:', err.message);
+  }
 
   // 3. Ensure assistant_threads allows nullable project_id and environment_id
   const threadCols = db.prepare('PRAGMA table_info(assistant_threads);').all();
