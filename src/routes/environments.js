@@ -310,7 +310,11 @@ router.post('/:environmentId/services', async (req, res, next) => {
       });
     }
 
-    return res.status(201).json(serviceMapped);
+    return res.status(201).json({
+      service: serviceMapped,
+      data: serviceMapped,
+      ...serviceMapped
+    });
   } catch (err) {
     next(err);
   }
