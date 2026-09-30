@@ -20,7 +20,12 @@ info:
     - The frontend always works inside a project + environment. Canvas, services, variables,
       deployments, logs, metrics and domains are environment-scoped.
 servers:
+  - url: https://api.morline.space/v1
+    description: Production API (Railway + Cloudflare Tunnel)
+  - url: http://localhost:3001/v1
+    description: Local Development Server
   - url: /v1
+    description: Relative Path
 security:
   - bearerAuth: []
 
@@ -1366,6 +1371,38 @@ paths:
       summary: Disconnect GitHub from the team
       parameters: [{ name: teamId, in: query, required: true, schema: { type: string } }]
       responses: { "204": { description: Disconnected } }
+  /integrations/github/callback:
+    get:
+      tags: [GitHub]
+      summary: OAuth and GitHub App installation redirect callback
+      parameters:
+        - { name: code, in: query, schema: { type: string }, description: OAuth authorization code }
+        - { name: state, in: query, schema: { type: string }, description: Team ID state }
+        - { name: installation_id, in: query, schema: { type: integer }, description: GitHub App installation ID }
+        - { name: setup_action, in: query, schema: { type: string }, description: GitHub setup action status }
+      responses:
+        "302":
+          description: Redirects to frontend integrations settings
+  /integrations/github/webhook:
+    post:
+      tags: [GitHub]
+      summary: GitHub Webhook receiver (push auto-deployments and installation events)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Webhook received and processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggered: { type: integer }
+                  services: { type: array, items: { type: string } }
   /integrations/github/repos:
     get:
       tags: [GitHub]
