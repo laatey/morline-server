@@ -40,3 +40,8 @@ export const SERVICE_PORT_MAX = parseInt(process.env.SERVICE_PORT_MAX || '4999',
 
 export const LOG_RETENTION_LINES = 10000;
 
+// GitHub Integration (optional, enables real GitHub repo listing and cloning)
+export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
+export const GITHUB_APP_NAME = process.env.GITHUB_APP_NAME || 'moorline';
+
+

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from 'node:child_process';
-import { APPS_DIR } from '../config.js';
+import { APPS_DIR, GITHUB_TOKEN } from '../config.js';
 import { queryOne, execute } from '../db/index.js';
 import { logManager } from './log-manager.js';
 import { processSupervisor } from './process-supervisor.js';
@@ -77,8 +77,54 @@ server.listen(port, () => {
     const settings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', serviceId) || {};
     const cwd = this.getWorkspaceDir(serviceId);
 
-    // Prepare files if not present
-    this.seedTemplateFiles(serviceId, service.source_template_id, service.name);
+    // If GitHub source, clone repository
+    if (service.source_type === 'github' && service.source_repo) {
+      const gitDir = path.join(cwd, '.git');
+      if (!fs.existsSync(gitDir)) {
+        logManager.appendLog({
+          deploymentId,
+          serviceId,
+          serviceName: service.name,
+          environmentId: service.environment_id,
+          level: 'info',
+          message: `[Git] Cloning repository https://github.com/${service.source_repo}...`
+        });
+
+        const cloneUrl = GITHUB_TOKEN
+          ? `https://${GITHUB_TOKEN}@github.com/${service.source_repo}.git`
+          : `https://github.com/${service.source_repo}.git`;
+        const branch = service.source_branch || 'main';
+
+        await new Promise((resolve) => {
+          exec(`git clone --depth 1 -b ${branch} ${cloneUrl} .`, { cwd }, (err) => {
+            if (err) {
+              logManager.appendLog({
+                deploymentId,
+                serviceId,
+                serviceName: service.name,
+                environmentId: service.environment_id,
+                level: 'warn',
+                message: `[Git] Clone failed or branch unavailable. Using seed files.`
+              });
+              this.seedTemplateFiles(serviceId, service.source_template_id, service.name);
+            } else {
+              logManager.appendLog({
+                deploymentId,
+                serviceId,
+                serviceName: service.name,
+                environmentId: service.environment_id,
+                level: 'info',
+                message: `[Git] Successfully cloned repository.`
+              });
+            }
+            resolve();
+          });
+        });
+      }
+    } else {
+      // Prepare files if not present
+      this.seedTemplateFiles(serviceId, service.source_template_id, service.name);
+    }
 
     execute('UPDATE deployments SET state = ?, started_at = ? WHERE id = ?', 'building', new Date().toISOString(), deploymentId);
     execute('UPDATE services SET building_deployment_id = ? WHERE id = ?', deploymentId, serviceId);

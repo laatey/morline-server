@@ -2,21 +2,42 @@ import { Router } from 'express';
 import { execute, queryOne } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validationError } from '../middleware/error-handler.js';
+import { GITHUB_TOKEN, GITHUB_APP_NAME } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
 
 // GET /integrations/github
-router.get('/', (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     const { teamId } = req.query;
     if (!teamId) throw validationError('teamId is required');
 
     const row = queryOne('SELECT * FROM github_integration WHERE team_id = ?', teamId);
+    let connected = Boolean(row && row.connected);
+    let account = row?.account || null;
+
+    if (GITHUB_TOKEN && !connected) {
+      try {
+        const ghRes = await fetch('https://api.github.com/user', {
+          headers: {
+            'Authorization': `Bearer ${GITHUB_TOKEN}`,
+            'User-Agent': 'Moorline-Server',
+            'Accept': 'application/vnd.github+json'
+          }
+        });
+        if (ghRes.ok) {
+          const user = await ghRes.json();
+          connected = true;
+          account = user.login;
+        }
+      } catch (e) {}
+    }
+
     return res.json({
-      connected: Boolean(row && row.connected),
-      account: row?.account || null,
-      installUrl: 'https://github.com/apps/moorline/installations/new'
+      connected,
+      account,
+      installUrl: `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`
     });
   } catch (err) {
     next(err);
@@ -37,41 +58,69 @@ router.delete('/', (req, res, next) => {
 });
 
 // GET /integrations/github/repos
-router.get('/repos', (req, res, next) => {
+router.get('/repos', async (req, res, next) => {
   try {
     const { teamId, q } = req.query;
     if (!teamId) throw validationError('teamId is required');
 
-    const repos = [
-      {
-        fullName: 'morline-org/sample-node-api',
-        private: false,
-        defaultBranch: 'main',
-        updatedAt: new Date().toISOString(),
-        alreadyDeployedIn: []
-      },
-      {
-        fullName: 'morline-org/sample-nextjs-app',
-        private: false,
-        defaultBranch: 'main',
-        updatedAt: new Date().toISOString(),
-        alreadyDeployedIn: []
-      },
-      {
-        fullName: 'morline-org/fastapi-backend',
-        private: true,
-        defaultBranch: 'main',
-        updatedAt: new Date().toISOString(),
-        alreadyDeployedIn: []
-      },
-      {
-        fullName: 'morline-org/vite-react-spa',
-        private: false,
-        defaultBranch: 'main',
-        updatedAt: new Date().toISOString(),
-        alreadyDeployedIn: []
+    let repos = [];
+
+    if (GITHUB_TOKEN) {
+      try {
+        const ghRes = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+          headers: {
+            'Authorization': `Bearer ${GITHUB_TOKEN}`,
+            'User-Agent': 'Moorline-Server',
+            'Accept': 'application/vnd.github+json'
+          }
+        });
+        if (ghRes.ok) {
+          const ghData = await ghRes.json();
+          repos = ghData.map((r) => ({
+            fullName: r.full_name,
+            private: r.private,
+            defaultBranch: r.default_branch || 'main',
+            updatedAt: r.updated_at,
+            alreadyDeployedIn: []
+          }));
+        }
+      } catch (e) {
+        console.error('[GitHub] Error fetching live repos:', e.message);
       }
-    ];
+    }
+
+    if (repos.length === 0) {
+      repos = [
+        {
+          fullName: 'morline-org/sample-node-api',
+          private: false,
+          defaultBranch: 'main',
+          updatedAt: new Date().toISOString(),
+          alreadyDeployedIn: []
+        },
+        {
+          fullName: 'morline-org/sample-nextjs-app',
+          private: false,
+          defaultBranch: 'main',
+          updatedAt: new Date().toISOString(),
+          alreadyDeployedIn: []
+        },
+        {
+          fullName: 'morline-org/fastapi-backend',
+          private: true,
+          defaultBranch: 'main',
+          updatedAt: new Date().toISOString(),
+          alreadyDeployedIn: []
+        },
+        {
+          fullName: 'morline-org/vite-react-spa',
+          private: false,
+          defaultBranch: 'main',
+          updatedAt: new Date().toISOString(),
+          alreadyDeployedIn: []
+        }
+      ];
+    }
 
     const filtered = q ? repos.filter(r => r.fullName.toLowerCase().includes(q.toLowerCase())) : repos;
 
@@ -85,7 +134,33 @@ router.get('/repos', (req, res, next) => {
 });
 
 // GET /integrations/github/repos/:owner/:repo/branches
-router.get('/repos/:owner/:repo/branches', (req, res) => {
+router.get('/repos/:owner/:repo/branches', async (req, res) => {
+  const { owner, repo } = req.params;
+
+  if (GITHUB_TOKEN) {
+    try {
+      const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches`, {
+        headers: {
+          'Authorization': `Bearer ${GITHUB_TOKEN}`,
+          'User-Agent': 'Moorline-Server',
+          'Accept': 'application/vnd.github+json'
+        }
+      });
+      if (ghRes.ok) {
+        const branches = await ghRes.json();
+        return res.json({
+          data: branches.map((b) => ({
+            name: b.name,
+            default: b.name === 'main' || b.name === 'master',
+            sha: b.commit?.sha || 'unknown'
+          }))
+        });
+      }
+    } catch (e) {
+      console.error('[GitHub] Error fetching live branches:', e.message);
+    }
+  }
+
   return res.json({
     data: [
       { name: 'main', default: true, sha: '8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a' },
