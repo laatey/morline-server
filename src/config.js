@@ -41,10 +41,32 @@ export const SERVICE_PORT_MAX = parseInt(process.env.SERVICE_PORT_MAX || '4999',
 export const LOG_RETENTION_LINES = 10000;
 
 // GitHub OAuth & App Configuration
-export const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || null;
+export const GITHUB_APP_ID = process.env.GITHUB_APP_ID || '5132622';
+export const GITHUB_APP_NAME = process.env.GITHUB_APP_NAME || 'morline-cloud';
+export const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || 'Iv23li05lbpUNBiGC7CI';
 export const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || null;
-export const GITHUB_APP_NAME = process.env.GITHUB_APP_NAME || 'morline';
+export const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || null;
 export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
+
+// GitHub Private Key loader (string, base64, or file)
+function loadGitHubPrivateKey() {
+  if (process.env.GITHUB_PRIVATE_KEY) {
+    return process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
+  }
+  if (process.env.GITHUB_PRIVATE_KEY_BASE64) {
+    return Buffer.from(process.env.GITHUB_PRIVATE_KEY_BASE64, 'base64').toString('utf8');
+  }
+  const defaultKeyPath = process.env.GITHUB_PRIVATE_KEY_PATH || path.join(DATA_DIR, 'github-private-key.pem');
+  if (fs.existsSync(defaultKeyPath)) {
+    try {
+      return fs.readFileSync(defaultKeyPath, 'utf8');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+export const GITHUB_PRIVATE_KEY = loadGitHubPrivateKey();
 
 // AI Assistant LLM Provider Configuration
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;

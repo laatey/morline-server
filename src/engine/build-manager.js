@@ -6,6 +6,7 @@ import { queryOne, execute } from '../db/index.js';
 import { logManager } from './log-manager.js';
 import { processSupervisor } from './process-supervisor.js';
 import { eventBus } from './event-bus.js';
+import { getRepoInstallationToken, getInstallationToken } from '../services/github-app.js';
 
 class BuildManager {
   getWorkspaceDir(serviceId) {
@@ -101,19 +102,34 @@ server.listen(port, () => {
     if (service.source_type === 'github' && service.source_repo) {
       const gitDir = path.join(cwd, '.git');
       if (!fs.existsSync(gitDir)) {
-        // Retrieve team's OAuth access token from database
-        const teamRow = queryOne(`
-          SELECT gi.access_token 
-          FROM services s
-          JOIN environments e ON e.id = s.environment_id
-          JOIN projects p ON p.id = e.project_id
-          LEFT JOIN github_integration gi ON gi.team_id = p.team_id AND gi.connected = 1
-          WHERE s.id = ?
-        `, serviceId);
-        const token = teamRow?.access_token || GITHUB_TOKEN || null;
+        // Retrieve installation token or team's OAuth access token from database
+        const cleanRepo = service.source_repo.replace(/\.git$/, '');
+        const [repoOwner, repoNameOnly] = cleanRepo.includes('/') ? cleanRepo.split('/') : [null, cleanRepo];
+
+        let token = null;
+        if (repoOwner && repoNameOnly) {
+          token = await getRepoInstallationToken(repoOwner, repoNameOnly);
+        }
+
+        if (!token) {
+          const teamRow = queryOne(`
+            SELECT gi.access_token, gi.installation_id 
+            FROM services s
+            JOIN environments e ON e.id = s.environment_id
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN github_integration gi ON gi.team_id = p.team_id AND gi.connected = 1
+            WHERE s.id = ?
+          `, serviceId);
+
+          if (teamRow?.installation_id) {
+            token = await getInstallationToken(teamRow.installation_id);
+          }
+          if (!token) {
+            token = teamRow?.access_token || GITHUB_TOKEN || null;
+          }
+        }
 
         const branch = service.source_branch || 'main';
-        const cleanRepo = service.source_repo.replace(/\.git$/, '');
         const cloneUrl = token
           ? `https://x-access-token:${token}@github.com/${cleanRepo}.git`
           : `https://github.com/${cleanRepo}.git`;

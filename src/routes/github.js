@@ -3,75 +3,124 @@ import crypto from 'node:crypto';
 import { execute, queryOne, queryAll } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validationError, conflict } from '../middleware/error-handler.js';
-import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_TOKEN, PUBLIC_URL } from '../config.js';
+import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL } from '../config.js';
 import { buildManager } from '../engine/build-manager.js';
+import {
+  generateGitHubAppJwt,
+  getInstallationToken,
+  getRepoInstallationToken,
+  listAppInstallations,
+  listInstallationRepositories
+} from '../services/github-app.js';
 
 const router = Router();
 
-// OAuth Callback (public endpoint, called by GitHub redirect)
+// Callback (public endpoint, called by GitHub redirect for OAuth or App Installation)
 router.get('/callback', async (req, res, next) => {
   try {
-    const { code, state: teamId, error } = req.query;
+    const { code, state: teamId, installation_id, setup_action, error } = req.query;
 
     if (error) {
       return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
     }
 
-    if (!code || !teamId) {
-      throw validationError('Missing code or teamId state in GitHub callback');
-    }
-
-    if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-      throw validationError('GitHub OAuth credentials (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) not configured on server');
-    }
-
-    // Exchange authorization code for user access token
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': 'Morline-Server'
-      },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code
-      })
-    });
-
-    const tokenData = await tokenRes.json();
-    if (tokenData.error) {
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
-    }
-
-    const accessToken = tokenData.access_token;
-
-    // Fetch authenticated user info
-    const userRes = await fetch('https://api.github.com/user', {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'User-Agent': 'Morline-Server',
-        'Accept': 'application/vnd.github+json'
+    // Case 1: GitHub App Installation callback
+    if (installation_id) {
+      const instId = parseInt(installation_id, 10);
+      let account = 'GitHub Account';
+      const jwt = generateGitHubAppJwt();
+      if (jwt) {
+        try {
+          const r = await fetch(`https://api.github.com/app/installations/${instId}`, {
+            headers: {
+              'Authorization': `Bearer ${jwt}`,
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'Morline-App'
+            }
+          });
+          if (r.ok) {
+            const data = await r.json();
+            account = data.account?.login || account;
+          }
+        } catch (e) {
+          console.error('[GitHub App] Error fetching installation details:', e.message);
+        }
       }
-    });
 
-    const ghUser = await userRes.json();
-    const account = ghUser.login || 'GitHub User';
-    const now = new Date().toISOString();
+      const targetTeamId = teamId || queryOne('SELECT id FROM teams ORDER BY created_at ASC')?.id || 'team_default';
+      const now = new Date().toISOString();
 
-    // Persist team integration token in database
-    execute(`
-      INSERT INTO github_integration (team_id, account, install_url, access_token, connected, connected_at)
-      VALUES (?, ?, ?, ?, 1, ?)
-      ON CONFLICT(team_id) DO UPDATE SET
-        account = excluded.account,
-        access_token = excluded.access_token,
-        connected = 1,
-        connected_at = excluded.connected_at
-    `, teamId, account, `https://github.com/${account}`, accessToken, now);
+      execute(`
+        INSERT INTO github_integration (team_id, account, install_url, installation_id, connected, connected_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT(team_id) DO UPDATE SET
+          account = excluded.account,
+          installation_id = excluded.installation_id,
+          connected = 1,
+          connected_at = excluded.connected_at
+      `, targetTeamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, instId, now);
 
-    return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+    }
+
+    // Case 2: OAuth Code Exchange callback
+    if (code) {
+      if (!teamId) {
+        throw validationError('Missing teamId state in GitHub callback');
+      }
+
+      if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+        throw validationError('GitHub OAuth credentials (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) not configured on server');
+      }
+
+      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'Morline-Server'
+        },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code
+        })
+      });
+
+      const tokenData = await tokenRes.json();
+      if (tokenData.error) {
+        return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
+      }
+
+      const accessToken = tokenData.access_token;
+
+      // Fetch authenticated user info
+      const userRes = await fetch('https://api.github.com/user', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'User-Agent': 'Morline-Server',
+          'Accept': 'application/vnd.github+json'
+        }
+      });
+
+      const ghUser = await userRes.json();
+      const account = ghUser.login || 'GitHub User';
+      const now = new Date().toISOString();
+
+      execute(`
+        INSERT INTO github_integration (team_id, account, install_url, access_token, connected, connected_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT(team_id) DO UPDATE SET
+          account = excluded.account,
+          access_token = excluded.access_token,
+          connected = 1,
+          connected_at = excluded.connected_at
+      `, teamId, account, `https://github.com/${account}`, accessToken, now);
+
+      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+    }
+
+    throw validationError('Missing code or installation_id in GitHub callback');
   } catch (err) {
     next(err);
   }
@@ -127,27 +176,49 @@ router.post('/webhook', async (req, res) => {
 // All endpoints below require authentication
 router.use(requireAuth);
 
-function getTeamToken(teamId) {
+async function getTeamToken(teamId) {
   if (!teamId) return null;
-  const row = queryOne('SELECT access_token FROM github_integration WHERE team_id = ? AND connected = 1', teamId);
+  const row = queryOne('SELECT access_token, installation_id FROM github_integration WHERE team_id = ? AND connected = 1', teamId);
+  if (row?.installation_id) {
+    const instToken = await getInstallationToken(row.installation_id);
+    if (instToken) return instToken;
+  }
   return row?.access_token || GITHUB_TOKEN || null;
 }
 
 // GET /integrations/github
-router.get('/', (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     const { teamId } = req.query;
     if (!teamId) throw validationError('teamId is required');
 
-    const row = queryOne('SELECT * FROM github_integration WHERE team_id = ?', teamId);
-    const connected = Boolean(row && row.connected && row.access_token);
-    const account = row?.account || null;
+    let row = queryOne('SELECT * FROM github_integration WHERE team_id = ?', teamId);
+    let connected = Boolean(row && row.connected && (row.access_token || row.installation_id));
+    let account = row?.account || null;
 
-    let installUrl = '';
-    if (GITHUB_CLIENT_ID) {
+    // If not directly recorded for this team, check if there's already an active GitHub App installation
+    if (!connected && GITHUB_APP_ID && GITHUB_PRIVATE_KEY) {
+      const installations = await listAppInstallations();
+      if (installations.length > 0) {
+        const inst = installations[0];
+        account = inst.account?.login || 'GitHub Account';
+        const now = new Date().toISOString();
+        execute(`
+          INSERT INTO github_integration (team_id, account, install_url, installation_id, connected, connected_at)
+          VALUES (?, ?, ?, ?, 1, ?)
+          ON CONFLICT(team_id) DO UPDATE SET
+            account = excluded.account,
+            installation_id = excluded.installation_id,
+            connected = 1,
+            connected_at = excluded.connected_at
+        `, teamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, inst.id, now);
+        connected = true;
+      }
+    }
+
+    let installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
+    if (!GITHUB_APP_NAME && GITHUB_CLIENT_ID) {
       installUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,read:user&state=${teamId}`;
-    } else {
-      installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
     }
 
     return res.json({
@@ -179,26 +250,34 @@ router.get('/repos', async (req, res, next) => {
     const { teamId, q } = req.query;
     if (!teamId) throw validationError('teamId is required');
 
-    const token = getTeamToken(teamId);
-    if (!token) {
-      throw conflict('GitHub account is not connected for this team. Please connect your GitHub account.', 'github_not_connected');
-    }
+    let row = queryOne('SELECT access_token, installation_id FROM github_integration WHERE team_id = ? AND connected = 1', teamId);
+    let rawRepos = [];
 
-    const ghRes = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': 'Morline-Server',
-        'Accept': 'application/vnd.github+json'
+    if (row?.installation_id) {
+      rawRepos = await listInstallationRepositories(row.installation_id);
+    } else if (row?.access_token || GITHUB_TOKEN) {
+      const token = row?.access_token || GITHUB_TOKEN;
+      const ghRes = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'User-Agent': 'Morline-Server',
+          'Accept': 'application/vnd.github+json'
+        }
+      });
+      if (ghRes.ok) {
+        rawRepos = await ghRes.json();
       }
-    });
-
-    if (!ghRes.ok) {
-      const err = await ghRes.json().catch(() => ({}));
-      throw conflict(`GitHub API error: ${err.message || ghRes.statusText}`, 'github_error');
+    } else {
+      // Check if any app installations exist on account
+      const installations = await listAppInstallations();
+      if (installations.length > 0) {
+        rawRepos = await listInstallationRepositories(installations[0].id);
+      } else {
+        throw conflict('GitHub account is not connected for this team. Please connect your GitHub account.', 'github_not_connected');
+      }
     }
 
-    const ghData = await ghRes.json();
-    const repos = ghData.map((r) => ({
+    const repos = rawRepos.map((r) => ({
       fullName: r.full_name,
       private: r.private,
       defaultBranch: r.default_branch || 'main',
@@ -223,7 +302,11 @@ router.get('/repos/:owner/:repo/branches', async (req, res, next) => {
     const { owner, repo } = req.params;
     const { teamId } = req.query;
 
-    const token = getTeamToken(teamId);
+    let token = await getTeamToken(teamId);
+    if (!token) {
+      token = await getRepoInstallationToken(owner, repo);
+    }
+
     if (!token) {
       throw conflict('GitHub account is not connected for this team.', 'github_not_connected');
     }

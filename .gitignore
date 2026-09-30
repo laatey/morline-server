@@ -22,3 +22,7 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Certificates and keys
+*.pem
+*.key

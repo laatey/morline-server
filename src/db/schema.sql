@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS github_integration (
   account TEXT NOT NULL,
   install_url TEXT NOT NULL,
   access_token TEXT,
+  installation_id INTEGER,
   connected INTEGER NOT NULL DEFAULT 1,
   connected_at TEXT NOT NULL
 );
