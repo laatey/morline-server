@@ -1,6 +1,6 @@
 # Railway Nixpacks Configuration for Morline Backend
 [phases.setup]
-nixPkgs = ["nodejs_22", "cloudflared", "git"]
+nixPkgs = ["nodejs_22", "cloudflared", "git", "bun", "pnpm", "yarn", "python3", "python3Packages.pip", "go"]
 
 [phases.install]
 cmds = ["npm ci --omit=dev"]

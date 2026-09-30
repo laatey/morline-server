@@ -486,6 +486,14 @@ server.listen(port, '0.0.0.0', () => {
     for (const tool of tools || []) {
       const r = await this._run(ctx, { command: `command -v ${tool}`, cwd, env, timeoutMs: 15000, quiet: true });
       if (r.code !== 0) {
+        if (tool === 'bun' || tool === 'pnpm' || tool === 'yarn') {
+          ctx.log('info', `[Build] Tool "${tool}" not found on host; installing via npm...`);
+          const inst = await this._run(ctx, { command: `npm install -g ${tool}`, cwd, env, timeoutMs: 60000 });
+          if (inst.code === 0) {
+            ctx.log('info', `[Build] Successfully installed "${tool}"`);
+            continue;
+          }
+        }
         throw new BuildError(`Required tool "${tool}" is not installed on the build host`);
       }
     }
