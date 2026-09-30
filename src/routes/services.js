@@ -495,8 +495,10 @@ router.put('/services/:serviceId/variables', (req, res, next) => {
 // POST /services/:serviceId/variables (append / upsert)
 router.post('/services/:serviceId/variables', (req, res, next) => {
   try {
-    const service = getService(req.params.serviceId);
-    const { variables } = req.body || {};
+    let { variables } = req.body || {};
+    if (!variables && req.body?.key) {
+      variables = [{ key: req.body.key, value: req.body.value, secret: req.body.secret }];
+    }
     if (!Array.isArray(variables)) throw validationError('variables array is required');
 
     const now = new Date().toISOString();
