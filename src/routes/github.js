@@ -65,8 +65,9 @@ router.get('/callback', async (req, res, next) => {
 
     // Case 2: OAuth Code Exchange callback
     if (code) {
-      if (!teamId) {
-        throw validationError('Missing teamId state in GitHub callback');
+      if (!teamId || teamId.startsWith('http') || teamId.includes('{') || teamId.length > 32) {
+        const { handleGitHubOAuthCallback } = await import('./auth.js');
+        return handleGitHubOAuthCallback(req, res);
       }
 
       if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {

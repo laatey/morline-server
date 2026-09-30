@@ -150,7 +150,8 @@ router.get('/oauth/:provider/start', (req, res) => {
   const stateObj = { redirectTo, nonce: crypto.randomUUID() };
   const state = Buffer.from(JSON.stringify(stateObj)).toString('base64url');
 
-  const authUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(callbackUrl)}&scope=read:user,user:email&state=${encodeURIComponent(state)}`;
+  // Omit redirect_uri so GitHub uses the GitHub App's default configured callback URL
+  const authUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=read:user,user:email&state=${encodeURIComponent(state)}`;
 
   if (req.headers.accept && req.headers.accept.includes('application/json')) {
     return res.json({ url: authUrl });
@@ -158,8 +159,7 @@ router.get('/oauth/:provider/start', (req, res) => {
   return res.redirect(authUrl);
 });
 
-// GET /auth/oauth/:provider/callback
-router.get('/oauth/:provider/callback', async (req, res, next) => {
+export async function handleGitHubOAuthCallback(req, res) {
   try {
     const { code, state, error, error_description } = req.query;
 
@@ -314,6 +314,11 @@ router.get('/oauth/:provider/callback', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+}
+
+// GET /auth/oauth/:provider/callback
+router.get('/oauth/:provider/callback', (req, res, next) => {
+  return handleGitHubOAuthCallback(req, res).catch(next);
 });
 
 // POST /auth/refresh

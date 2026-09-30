@@ -76,6 +76,11 @@ app.get('/settings/integrations', async (req, res) => {
 </head><body><p style="color:#f87171;font-size:14px">GitHub connection failed: ${String(error).slice(0, 100)}</p></body></html>`);
   }
 
+  if (req.query.code) {
+    const { handleGitHubOAuthCallback } = await import('./routes/auth.js');
+    return handleGitHubOAuthCallback(req, res);
+  }
+
   // If GitHub sent an installation_id, auto-save it
   if (installation_id) {
     try {
