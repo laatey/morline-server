@@ -6,7 +6,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { notFound, conflict, validationError } from '../middleware/error-handler.js';
 import { eventBus } from '../engine/event-bus.js';
 import { logManager } from '../engine/log-manager.js';
-import { OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, GEMINI_API_KEY, ANTHROPIC_API_KEY } from '../config.js';
+import { OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, GEMINI_API_KEY, ANTHROPIC_API_KEY, AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL } from '../config.js';
 
 const router = Router();
 router.use('/projects/:projectId/assistant', requireAuth);
@@ -327,7 +327,34 @@ Instructions:
     { role: 'user', content: userContent }
   ];
 
-  // 3. Check Providers (OpenAI, Gemini, Anthropic)
+  // 3. Check AI Gateway Proxy first (or OpenAI, Gemini, Anthropic)
+  if (AI_GATEWAY_KEY) {
+    try {
+      const res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': AI_GATEWAY_KEY,
+          'Authorization': `Bearer ${AI_GATEWAY_KEY}`
+        },
+        body: JSON.stringify({
+          model: AI_GATEWAY_MODEL || 'google/gemini-2.5-flash',
+          messages
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content;
+        if (text) return text;
+      } else {
+        const errText = await res.text();
+        console.error('[Assistant] AI Gateway error:', res.status, errText);
+      }
+    } catch (err) {
+      console.error('[Assistant] AI Gateway Call Failed:', err.message);
+    }
+  }
+
   if (OPENAI_API_KEY) {
     try {
       const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
@@ -492,12 +519,21 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
       return res.end();
     }
 
-    return res.status(202).json({
+    const allMsgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', threadId);
+    const updatedThread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
+
+    return res.status(200).json({
+      thread: {
+        id: threadId,
+        title: updatedThread?.title || 'New conversation',
+        messages: allMsgs.map(m => ({ role: m.role === 'assistant' ? 'agent' : m.role, text: m.content }))
+      },
+      messages: allMsgs.map(m => ({ role: m.role === 'assistant' ? 'agent' : m.role, text: m.content })),
+      reply: { role: 'agent', text: replyText },
+      message: { role: 'agent', text: replyText },
+      text: replyText,
       userMessage: userMessageMapped,
       assistantMessage: assistantMessageMapped,
-      reply: replyText,
-      text: replyText,
-      role: 'agent',
       assistantMessageId: assistantMsgId
     });
   } catch (err) {

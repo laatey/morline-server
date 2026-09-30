@@ -76,6 +76,10 @@ function loadGitHubPrivateKey() {
 export const GITHUB_PRIVATE_KEY = loadGitHubPrivateKey();
 
 // AI Assistant LLM Provider Configuration
+export const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || 'https://key-keeper-proxy.lovable.app/api/public/ai';
+export const AI_GATEWAY_KEY = process.env.AI_GATEWAY_KEY || 'Nii@150608';
+export const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || 'google/gemini-2.5-flash';
+
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
