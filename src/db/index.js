@@ -76,6 +76,17 @@ function applyMigrations(db) {
     `);
     db.exec('PRAGMA foreign_keys = ON;');
   }
+
+  // 4. Create password_resets table for forgot-password flow
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token TEXT NOT NULL,
+      user_id TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (token)
+    );
+  `);
 }
 
 export function queryOne(sql, ...params) {

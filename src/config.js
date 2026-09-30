@@ -28,6 +28,13 @@ export const PUBLIC_URL = process.env.PUBLIC_URL ||
   (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : null) ||
   (BASE_DOMAIN && BASE_DOMAIN !== 'localhost' ? `https://api.${BASE_DOMAIN}` : `http://localhost:${PORT}`);
 
+// Frontend URL (where the Lovable/React app lives)
+export const FRONTEND_URL = process.env.FRONTEND_URL ||
+  (BASE_DOMAIN && BASE_DOMAIN !== 'localhost' ? `https://${BASE_DOMAIN}` : 'http://localhost:5173');
+
+// Resend email API
+export const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
+
 // Cloudflare Tunnel Token (optional, for token-based cloudflared tunnel execution on Railway)
 export const CLOUDFLARE_TUNNEL_TOKEN = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN || null;
 

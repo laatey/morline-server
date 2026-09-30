@@ -7,6 +7,7 @@ import { mapUser, mapSessionInfo } from '../db/mappers.js';
 import { signAccessToken, requireAuth } from '../middleware/auth.js';
 import { conflict, unauthorized, notFound } from '../middleware/error-handler.js';
 import { REFRESH_EXPIRES_DAYS } from '../config.js';
+import { sendWelcomeEmail, sendPasswordResetEmail } from '../services/email.js';
 
 const router = Router();
 
@@ -90,6 +91,9 @@ router.post('/signup', async (req, res, next) => {
 
     const userRow = queryOne('SELECT * FROM users WHERE id = ?', userId);
     const session = createSessionRecord(userId, req);
+
+    // Fire welcome email (non-blocking)
+    sendWelcomeEmail({ to: body.email.toLowerCase(), name: body.name }).catch(() => {});
 
     return res.status(201).json({
       user: mapUser(userRow),
@@ -209,7 +213,26 @@ router.post('/verify-email/resend', (req, res) => {
 });
 
 // POST /auth/password/forgot
-router.post('/password/forgot', (req, res) => {
+router.post('/password/forgot', async (req, res) => {
+  const { email } = req.body || {};
+  // Always respond 200 to avoid email enumeration
+  if (!email) return res.status(200).json({ sent: true });
+
+  const user = queryOne('SELECT * FROM users WHERE email = ?', email.toLowerCase());
+  if (!user) return res.status(200).json({ sent: true });
+
+  const resetToken = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 3600000).toISOString(); // 1 hour
+  const now = new Date().toISOString();
+
+  execute(`
+    INSERT INTO password_resets (token, user_id, expires_at, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at, created_at = excluded.created_at
+  `, resetToken, user.id, expiresAt, now);
+
+  sendPasswordResetEmail({ to: user.email, name: user.name, resetToken }).catch(() => {});
+
   return res.status(200).json({ sent: true });
 });
 
@@ -218,11 +241,21 @@ router.post('/password/reset', async (req, res, next) => {
   try {
     const { token, newPassword } = req.body || {};
     if (!newPassword || newPassword.length < 8) {
-      return res.status(400).json({
-        code: 'validation_failed',
-        message: 'Password must be at least 8 characters'
-      });
+      return res.status(400).json({ code: 'validation_failed', message: 'Password must be at least 8 characters' });
     }
+    if (!token) {
+      return res.status(400).json({ code: 'validation_failed', message: 'Reset token is required' });
+    }
+
+    const record = queryOne('SELECT * FROM password_resets WHERE token = ?', token);
+    if (!record || new Date(record.expires_at) < new Date()) {
+      return res.status(400).json({ code: 'invalid_token', message: 'Reset link is invalid or has expired' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    execute('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', passwordHash, new Date().toISOString(), record.user_id);
+    execute('DELETE FROM password_resets WHERE user_id = ?', record.user_id);
+
     return res.status(200).json({ reset: true });
   } catch (err) {
     next(err);

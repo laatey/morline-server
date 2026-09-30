@@ -6,6 +6,7 @@ import { mapTeam, mapMember, mapProject, mapUserRef } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound, forbidden, conflict, validationError } from '../middleware/error-handler.js';
 import { buildManager } from '../engine/build-manager.js';
+import { sendTeamInviteEmail } from '../services/email.js';
 
 const router = Router();
 
@@ -178,6 +179,17 @@ router.post('/teams/:teamId/invites', requireAuth, (req, res, next) => {
       INSERT INTO team_invites (id, team_id, email, role, token, invited_by, expires_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `, inviteId, teamId, email.toLowerCase(), role, token, req.user.id, expiresAt, now.toISOString());
+
+    const team = queryOne('SELECT name FROM teams WHERE id = ?', teamId);
+
+    // Send invite email (non-blocking)
+    sendTeamInviteEmail({
+      to: email.toLowerCase(),
+      inviterName: req.user.name || 'Someone',
+      teamName: team?.name || 'Morline Team',
+      role,
+      token
+    }).catch(() => {});
 
     return res.status(201).json({
       id: inviteId,
