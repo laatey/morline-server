@@ -4,6 +4,7 @@ import { mapConnection } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound } from '../middleware/error-handler.js';
 import { eventBus } from '../engine/event-bus.js';
+import { createStagedChange } from '../services/staged-changes-helper.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -52,16 +53,26 @@ router.delete('/:connectionId', (req, res) => {
   if (!conn) throw notFound('Connection not found');
 
   const removeVars = req.query.removeVariables === 'true';
+  const fromSrv = queryOne('SELECT name FROM services WHERE id = ?', conn.from_service_id);
+  const toSrv = queryOne('SELECT name FROM services WHERE id = ?', conn.to_service_id);
 
   transaction(() => {
     if (removeVars) {
-      const toSrv = queryOne('SELECT name FROM services WHERE id = ?', conn.to_service_id);
       if (toSrv) {
         const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
         execute('DELETE FROM variables WHERE scope_type = ? AND scope_id = ? AND key = ?', 'service', conn.from_service_id, key);
       }
     }
     execute('DELETE FROM connections WHERE id = ?', connId);
+
+    createStagedChange({
+      environmentId: conn.environment_id,
+      serviceId: conn.from_service_id,
+      serviceName: fromSrv ? fromSrv.name : null,
+      type: 'connection.deleted',
+      summary: `Removed connection to ${toSrv ? toSrv.name : 'service'}`,
+      payload: { connectionId: connId }
+    });
   });
 
   eventBus.emitEnvironmentEvent(conn.environment_id, {

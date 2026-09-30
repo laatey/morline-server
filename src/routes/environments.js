@@ -9,6 +9,7 @@ import { logManager } from '../engine/log-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { buildManager } from '../engine/build-manager.js';
 import stagedChangesRouter from './staged-changes.js';
+import { createStagedChange } from '../services/staged-changes-helper.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -377,6 +378,15 @@ router.post('/:environmentId/connections', (req, res, next) => {
         const vRow = queryOne('SELECT * FROM variables WHERE id = ?', varId);
         if (vRow) injectedVars.push(mapVariable(vRow));
       }
+
+      createStagedChange({
+        environmentId: env.id,
+        serviceId: fromServiceId,
+        serviceName: fromSrv.name,
+        type: 'connection.created',
+        summary: `Connected to ${toSrv.name} (${label})`,
+        payload: { connectionId: connId, fromServiceId, toServiceId }
+      });
     });
 
     const connRow = queryOne('SELECT * FROM connections WHERE id = ?', connId);
