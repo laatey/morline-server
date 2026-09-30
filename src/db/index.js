@@ -113,22 +113,26 @@ function applyMigrations(db) {
   `);
 }
 
+function clean(params) {
+  return params.map(p => (p === undefined ? null : p));
+}
+
 export function queryOne(sql, ...params) {
   const db = getDb();
   const stmt = db.prepare(sql);
-  return stmt.get(...params);
+  return stmt.get(...clean(params));
 }
 
 export function queryAll(sql, ...params) {
   const db = getDb();
   const stmt = db.prepare(sql);
-  return stmt.all(...params);
+  return stmt.all(...clean(params));
 }
 
 export function execute(sql, ...params) {
   const db = getDb();
   const stmt = db.prepare(sql);
-  return stmt.run(...params);
+  return stmt.run(...clean(params));
 }
 
 export function transaction(fn) {
