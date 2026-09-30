@@ -1,0 +1,2494 @@
+openapi: 3.1.0
+info:
+  title: Moorline API
+  version: 1.0.0
+  description: |
+    External API contract between the Moorline frontend and backend.
+    Covers auth, workspaces/teams, projects, environments, canvas (services + connections),
+    deployments, logs, metrics, variables, domains, AI assistant threads, activity,
+    notifications, GitHub integration, and user settings.
+
+    Conventions
+    - All bodies are JSON (`application/json`) unless stated. Timestamps are ISO-8601 UTC strings.
+    - IDs are opaque strings. Prefixes are recommended but not required (`prj_`, `env_`, `svc_`, `dep_`...).
+    - List endpoints use cursor pagination: `?limit=&cursor=` and return `{ data, nextCursor }`.
+    - Errors always use the `Error` schema.
+    - Mutations accept an optional `Idempotency-Key` header; a repeated key returns the original result.
+    - Long-running work (deploys, AI actions, domain verification) returns `202` with a resource
+      whose `status` the frontend polls or follows via the SSE stream endpoints.
+    - Streaming endpoints use `text/event-stream` (SSE). Each event `data:` is JSON.
+    - The frontend always works inside a project + environment. Canvas, services, variables,
+      deployments, logs, metrics and domains are environment-scoped.
+servers:
+  - url: /v1
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Users
+  - name: Teams
+  - name: Projects
+  - name: Environments
+  - name: Canvas
+  - name: Services
+  - name: Connections
+  - name: Templates
+  - name: Deployments
+  - name: Logs
+  - name: Metrics
+  - name: Variables
+  - name: Domains
+  - name: GitHub
+  - name: Assistant
+  - name: Activity
+  - name: Notifications
+  - name: Search
+
+paths:
+  # ───────────────────────────── AUTH ─────────────────────────────
+  /auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create an account with email + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        "201":
+          description: Account created. `session` is null when email verification is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, requiresEmailVerification]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  session: { oneOf: [{ $ref: "#/components/schemas/Session" }, { type: "null" }] }
+                  requiresEmailVerification: { type: boolean }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in with email + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Email not verified (`code=email_not_verified`)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/oauth/{provider}/start:
+    get:
+      tags: [Auth]
+      summary: Begin OAuth sign-in (redirects to provider)
+      security: []
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [github, google] } }
+        - { name: redirectTo, in: query, required: false, schema: { type: string, format: uri }, description: Frontend URL to return to }
+      responses:
+        "302": { description: Redirect to provider }
+
+  /auth/oauth/{provider}/callback:
+    get:
+      tags: [Auth]
+      summary: OAuth callback; redirects back to `redirectTo` with session established
+      security: []
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [github, google] } }
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: "Redirect to frontend; on failure appends `?error=<code>`" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties: { refreshToken: { type: string } }
+      responses:
+        "200": { description: New session, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: End the current session
+      responses:
+        "204": { description: Signed out }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Confirm email using the token from the verification email
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } }
+      responses:
+        "200": { description: Verified and signed in, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "400": { description: Token invalid or expired (`code=token_invalid`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /auth/verify-email/resend:
+    post:
+      tags: [Auth]
+      summary: Resend verification email
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } }
+      responses:
+        "204": { description: Sent if the account exists (always 204) }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/password/forgot:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } }
+      responses:
+        "204": { description: Always 204 to avoid account enumeration }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/password/reset:
+    post:
+      tags: [Auth]
+      summary: Set a new password using a reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        "204": { description: Password updated; user must sign in }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List active sessions for the current user
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/SessionInfo" } }
+  /auth/sessions/{sessionId}:
+    delete:
+      tags: [Auth]
+      summary: Revoke a session
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────── USERS ─────────────────────────────
+  /me:
+    get:
+      tags: [Users]
+      summary: Current user, memberships and onboarding state (used on app boot)
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Users]
+      summary: Update profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                username: { type: string, pattern: "^[a-z0-9-]{2,39}$" }
+                avatarUrl: { type: [string, "null"], format: uri }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Users]
+      summary: Delete account. Fails if the user is the sole owner of a team.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [confirm], properties: { confirm: { type: string, description: Must equal the user's email } } } } }
+      responses:
+        "204": { description: Deleted }
+        "409": { description: Sole owner of a team (`code=sole_owner`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /me/avatar:
+    post:
+      tags: [Users]
+      summary: Upload avatar image
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties: { file: { type: string, format: binary, description: "png/jpeg/webp, max 2 MB" } }
+      responses:
+        "200": { description: Uploaded, content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "413": { description: File too large, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /me/password:
+    put:
+      tags: [Users]
+      summary: Change password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 8 }
+      responses:
+        "204": { description: Changed }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /me/settings:
+    get:
+      tags: [Users]
+      summary: User preferences
+      responses:
+        "200": { description: Settings, content: { application/json: { schema: { $ref: "#/components/schemas/UserSettings" } } } }
+    patch:
+      tags: [Users]
+      summary: Update preferences (partial)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UserSettings" } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/UserSettings" } } } }
+
+  /me/onboarding:
+    patch:
+      tags: [Users]
+      summary: Mark onboarding steps complete / dismissed
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/OnboardingState" } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/OnboardingState" } } } }
+
+  # ───────────────────────────── TEAMS ─────────────────────────────
+  /teams:
+    get:
+      tags: [Teams]
+      summary: Teams the user belongs to (workspace switcher)
+      responses:
+        "200":
+          description: Teams
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Team" } } } } } }
+    post:
+      tags: [Teams]
+      summary: Create a team (onboarding or switcher)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+                slug: { type: string, pattern: "^[a-z0-9-]{2,39}$" }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Team" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /teams/{teamId}:
+    parameters: [{ $ref: "#/components/parameters/teamId" }]
+    get:
+      tags: [Teams]
+      summary: Team details
+      responses:
+        "200": { description: Team, content: { application/json: { schema: { $ref: "#/components/schemas/Team" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Teams]
+      summary: Rename team (owner/admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { name: { type: string }, slug: { type: string } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Team" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Teams]
+      summary: Delete team (owner only; must have no projects)
+      responses:
+        "204": { description: Deleted }
+        "409": { description: Team still has projects (`code=team_not_empty`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /teams/{teamId}/members:
+    parameters: [{ $ref: "#/components/parameters/teamId" }]
+    get:
+      tags: [Teams]
+      summary: List members and pending invites
+      responses:
+        "200":
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Member" } }
+                  invites: { type: array, items: { $ref: "#/components/schemas/Invite" } }
+  /teams/{teamId}/invites:
+    parameters: [{ $ref: "#/components/parameters/teamId" }]
+    post:
+      tags: [Teams]
+      summary: Invite a member by email ("Invite member" in Settings)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201": { description: Invite sent, content: { application/json: { schema: { $ref: "#/components/schemas/Invite" } } } }
+        "409": { description: Already a member or invited, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /teams/{teamId}/invites/{inviteId}:
+    parameters:
+      - { $ref: "#/components/parameters/teamId" }
+      - { name: inviteId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Teams]
+      summary: Revoke an invite
+      responses:
+        "204": { description: Revoked }
+  /invites/{token}/accept:
+    post:
+      tags: [Teams]
+      summary: Accept an invite (from invite link)
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Joined, content: { application/json: { schema: { $ref: "#/components/schemas/Team" } } } }
+        "400": { description: Invalid/expired invite, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /teams/{teamId}/members/{userId}:
+    parameters:
+      - { $ref: "#/components/parameters/teamId" }
+      - { name: userId, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Teams]
+      summary: Change a member's role
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: "#/components/schemas/Role" } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "409": { description: Cannot demote last owner, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    delete:
+      tags: [Teams]
+      summary: Remove member (or leave team when userId is self)
+      responses:
+        "204": { description: Removed }
+        "409": { description: Cannot remove last owner, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  # ───────────────────────────── PROJECTS ─────────────────────────────
+  /teams/{teamId}/projects:
+    parameters: [{ $ref: "#/components/parameters/teamId" }]
+    get:
+      tags: [Projects]
+      summary: List projects for the Projects home grid
+      description: Each item includes the card summary (status, online service count, latency, region, mini-canvas preview nodes).
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { name: q, in: query, schema: { type: string }, description: Search by project name }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ProjectHealth" }, description: Status filter chip }
+        - { name: sort, in: query, schema: { type: string, enum: [updated, name, created], default: updated } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+      responses:
+        "200":
+          description: Projects page. Empty `data` with no filters = first-run empty state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, nextCursor, counts]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/ProjectSummary" } }
+                  nextCursor: { type: [string, "null"] }
+                  counts:
+                    type: object
+                    description: Totals per status for the filter chips and hero stats
+                    properties:
+                      all: { type: integer }
+                      healthy: { type: integer }
+                      deploying: { type: integer }
+                      degraded: { type: integer }
+                      sleeping: { type: integer }
+                      services: { type: integer }
+                      deploysLast24h: { type: integer }
+    post:
+      tags: [Projects]
+      summary: Create a project (Add Project dialog)
+      description: |
+        `source` selects the dialog list item. `empty` creates a blank project; `github`
+        imports a repo as the first service; `template` / `database` / `docker` create one service.
+        Returns 201 with the project; if an initial service was created, its first deployment is queued
+        and `initialDeploymentId` is set.
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateProjectInput" } } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project]
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+                  initialServiceId: { type: [string, "null"] }
+                  initialDeploymentId: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "402": { $ref: "#/components/responses/PlanLimit" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /projects/{projectId}:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Projects]
+      summary: Project details (header, settings General section)
+      responses:
+        "200": { description: Project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Projects]
+      summary: Update project name/description/settings
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UpdateProjectInput" } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Projects]
+      summary: Delete project and all its environments/services (Danger zone)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [confirm], properties: { confirm: { type: string, description: Must equal project name } } } } }
+      responses:
+        "202": { description: Deletion started; project disappears from lists immediately }
+        "400": { description: Confirmation mismatch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /projects/{projectId}/duplicate:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    post:
+      tags: [Projects]
+      summary: Duplicate a project (card overflow menu)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                teamId: { type: string, description: Target team; defaults to source team }
+                includeVariables: { type: boolean, default: false }
+                includeVolumesData: { type: boolean, default: false }
+      responses:
+        "202": { description: Duplication started, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "402": { $ref: "#/components/responses/PlanLimit" }
+
+  /projects/{projectId}/transfer:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    post:
+      tags: [Projects]
+      summary: Transfer project to another team
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [teamId], properties: { teamId: { type: string } } } } }
+      responses:
+        "200": { description: Transferred, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /projects/{projectId}/favorite:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    put:
+      tags: [Projects]
+      summary: Pin project for current user
+      responses: { "204": { description: Pinned } }
+    delete:
+      tags: [Projects]
+      summary: Unpin project
+      responses: { "204": { description: Unpinned } }
+
+  /projects/{projectId}/usage:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Projects]
+      summary: Current-cycle spend vs spend limit (Settings > Spend limit)
+      responses:
+        "200":
+          description: Usage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  periodStart: { type: string, format: date-time }
+                  periodEnd: { type: string, format: date-time }
+                  spentUsd: { type: number }
+                  estimatedUsd: { type: number }
+                  limitUsd: { type: [number, "null"] }
+                  limitReached: { type: boolean }
+
+  # ───────────────────────────── ENVIRONMENTS ─────────────────────────────
+  /projects/{projectId}/environments:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Environments]
+      summary: Environments for the environment picker
+      responses:
+        "200":
+          description: Environments
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Environment" } } } } } }
+    post:
+      tags: [Environments]
+      summary: Create or fork an environment ("Fork environment…")
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9-]{1,40}$" }
+                forkFromEnvironmentId: { type: string, description: "Copies services, connections and variables" }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Environment" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /environments/{environmentId}:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Environments]
+      summary: Environment details
+      responses:
+        "200": { description: Environment, content: { application/json: { schema: { $ref: "#/components/schemas/Environment" } } } }
+    patch:
+      tags: [Environments]
+      summary: Rename environment
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { name: { type: string } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Environment" } } } }
+    delete:
+      tags: [Environments]
+      summary: Delete environment (production cannot be deleted)
+      responses:
+        "202": { description: Deletion started }
+        "409": { description: Protected environment (`code=environment_protected`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /environments/{environmentId}/status:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Environments]
+      summary: Lightweight status poll for all services (canvas node badges, top bar)
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  health: { $ref: "#/components/schemas/ProjectHealth" }
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        serviceId: { type: string }
+                        status: { $ref: "#/components/schemas/ServiceStatus" }
+                        activeDeploymentId: { type: [string, "null"] }
+                        buildingDeploymentId: { type: [string, "null"] }
+                        buildProgress: { type: [number, "null"], minimum: 0, maximum: 1 }
+                  pendingChanges: { type: integer, description: Staged canvas changes not yet applied }
+
+  /environments/{environmentId}/events:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Environments]
+      summary: SSE stream of live environment events (status, deploys, canvas edits by others)
+      responses:
+        "200":
+          description: "Event stream. Event types: service.status, deployment.created, deployment.updated, service.created, service.updated, service.deleted, connection.created, connection.deleted, domain.updated, assistant.action.updated"
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/EnvironmentEvent" }
+
+  # ───────────────────────────── CANVAS ─────────────────────────────
+  /environments/{environmentId}/canvas:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Canvas]
+      summary: Full canvas graph — services (with positions) and connections
+      responses:
+        "200":
+          description: Canvas. Empty `services` = empty-canvas state.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Canvas" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /environments/{environmentId}/canvas/layout:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    patch:
+      tags: [Canvas]
+      summary: Persist node positions after drag, undo/redo, or auto-layout
+      description: Batch update. `revision` enables optimistic concurrency; 409 returns the latest canvas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [positions]
+              properties:
+                revision: { type: integer }
+                positions:
+                  type: array
+                  items:
+                    type: object
+                    required: [serviceId, x, y]
+                    properties:
+                      serviceId: { type: string }
+                      x: { type: number }
+                      y: { type: number }
+      responses:
+        "200": { description: Saved, content: { application/json: { schema: { type: object, properties: { revision: { type: integer } } } } } }
+        "409":
+          description: Stale revision
+          content: { application/json: { schema: { $ref: "#/components/schemas/Canvas" } } }
+
+  /environments/{environmentId}/canvas/viewport:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    put:
+      tags: [Canvas]
+      summary: Save the current user's last pan/zoom (restored on reload)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [x, y, zoom]
+              properties:
+                x: { type: number }
+                y: { type: number }
+                zoom: { type: number, minimum: 0.3, maximum: 2 }
+      responses:
+        "204": { description: Saved }
+
+  # ───────────────────────────── TEMPLATES ─────────────────────────────
+  /templates:
+    get:
+      tags: [Templates]
+      summary: Catalogue for the "Add a service" command dialog and New Project list
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: group, in: query, schema: { type: string, enum: [Source, Databases, Starters, Apps] } }
+      responses:
+        "200":
+          description: Templates
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Template" } } } } } }
+  /templates/{templateId}:
+    get:
+      tags: [Templates]
+      summary: Template details including required inputs
+      parameters: [{ name: templateId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Template, content: { application/json: { schema: { $ref: "#/components/schemas/Template" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /regions:
+    get:
+      tags: [Templates]
+      summary: Available regions (with flag/country for project cards and settings)
+      responses:
+        "200":
+          description: Regions
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Region" } } } } } }
+
+  # ───────────────────────────── SERVICES ─────────────────────────────
+  /environments/{environmentId}/services:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Services]
+      summary: List services (sidebar filters on Deployments/Logs/Metrics pages)
+      parameters:
+        - { name: kind, in: query, schema: { $ref: "#/components/schemas/ServiceKind" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ServiceStatus" } }
+      responses:
+        "200":
+          description: Services
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Service" } } } } } }
+    post:
+      tags: [Services]
+      summary: Add a service to the canvas (from template, repo, image, or database)
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateServiceInput" } } }
+      responses:
+        "201":
+          description: Created; first deployment queued unless `deploy=false`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [service]
+                properties:
+                  service: { $ref: "#/components/schemas/Service" }
+                  deployment: { oneOf: [{ $ref: "#/components/schemas/Deployment" }, { type: "null" }] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "402": { $ref: "#/components/responses/PlanLimit" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /services/{serviceId}:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Services]
+      summary: Service details (inspector header + topology summary on Deploys tab)
+      responses:
+        "200": { description: Service, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceDetail" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Services]
+      summary: Update service settings (Settings tab)
+      description: Changes that require a rebuild return `requiresRedeploy=true`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UpdateServiceInput" } } }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { $ref: "#/components/schemas/Service" }
+                  requiresRedeploy: { type: boolean }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Services]
+      summary: Delete service ("Delete service" in Settings tab)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: Must equal service name }
+                deleteVolumes: { type: boolean, default: true }
+      responses:
+        "202": { description: Deletion started; connections to this service are removed }
+        "400": { description: Confirmation mismatch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /services/{serviceId}/restart:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Services]
+      summary: Restart running replicas without rebuilding
+      responses:
+        "202": { description: Restarting, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } }
+        "409": { description: No active deployment, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /services/{serviceId}/sleep:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Services]
+      summary: Put service to sleep
+      responses: { "202": { description: Sleeping, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } } }
+  /services/{serviceId}/wake:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Services]
+      summary: Wake a sleeping service
+      responses: { "202": { description: Waking, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } } }
+
+  /services/{serviceId}/duplicate:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Services]
+      summary: Duplicate a service on the canvas
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                position: { $ref: "#/components/schemas/Position" }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } }
+
+  /services/{serviceId}/volumes:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Services]
+      summary: Volumes attached to a service
+      responses:
+        "200":
+          description: Volumes
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Volume" } } } } } }
+    post:
+      tags: [Services]
+      summary: Attach a new volume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, mountPath, sizeGb]
+              properties:
+                name: { type: string }
+                mountPath: { type: string }
+                sizeGb: { type: integer, minimum: 1 }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Volume" } } } }
+  /volumes/{volumeId}:
+    parameters: [{ name: volumeId, in: path, required: true, schema: { type: string } }]
+    patch:
+      tags: [Services]
+      summary: Resize volume (grow only)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [sizeGb], properties: { sizeGb: { type: integer } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Volume" } } } }
+        "400": { description: Cannot shrink, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    delete:
+      tags: [Services]
+      summary: Delete volume
+      responses: { "204": { description: Deleted } }
+
+  # ───────────────────────────── CONNECTIONS ─────────────────────────────
+  /environments/{environmentId}/connections:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    post:
+      tags: [Connections]
+      summary: Connect two services (draws an edge on the canvas)
+      description: Optionally injects reference variables into the consumer (e.g. DATABASE_URL).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromServiceId, toServiceId]
+              properties:
+                fromServiceId: { type: string, description: Consumer }
+                toServiceId: { type: string, description: Dependency }
+                protocol: { type: string, enum: [http, tcp, queue] }
+                port: { type: integer }
+                injectVariables: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Connected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connection: { $ref: "#/components/schemas/Connection" }
+                  injectedVariables: { type: array, items: { $ref: "#/components/schemas/Variable" } }
+        "400": { description: Self-connection or cross-environment (`code=invalid_connection`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /connections/{connectionId}:
+    parameters: [{ name: connectionId, in: path, required: true, schema: { type: string } }]
+    patch:
+      tags: [Connections]
+      summary: Update connection label/port
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { protocol: { type: string, enum: [http, tcp, queue] }, port: { type: integer } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Connection" } } } }
+    delete:
+      tags: [Connections]
+      summary: Remove connection
+      parameters:
+        - { name: removeVariables, in: query, schema: { type: boolean, default: false } }
+      responses: { "204": { description: Removed } }
+
+  # ───────────────────────────── DEPLOYMENTS ─────────────────────────────
+  /environments/{environmentId}/deployments:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Deployments]
+      summary: Deployment history across the environment (Deployments page)
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { name: serviceId, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { $ref: "#/components/schemas/DeploymentState" } }
+        - { name: trigger, in: query, schema: { $ref: "#/components/schemas/DeploymentTrigger" } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Deployments, newest first
+          content: { application/json: { schema: { $ref: "#/components/schemas/DeploymentPage" } } }
+
+  /services/{serviceId}/deployments:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Deployments]
+      summary: Deployment history for one service (inspector Deploys tab)
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { name: state, in: query, schema: { $ref: "#/components/schemas/DeploymentState" } }
+      responses:
+        "200": { description: Deployments, content: { application/json: { schema: { $ref: "#/components/schemas/DeploymentPage" } } } }
+    post:
+      tags: [Deployments]
+      summary: Trigger a deploy ("Redeploy" button / deploy a specific commit)
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                commitSha: { type: string, description: Defaults to latest on configured branch }
+                clearBuildCache: { type: boolean, default: false }
+      responses:
+        "202": { description: Queued, content: { application/json: { schema: { $ref: "#/components/schemas/Deployment" } } } }
+        "409": { description: A build is already running (`code=deploy_in_progress`); body includes `details.deploymentId`, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "402": { $ref: "#/components/responses/PlanLimit" }
+
+  /deployments/{deploymentId}:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    get:
+      tags: [Deployments]
+      summary: Deployment details with build phases
+      responses:
+        "200": { description: Deployment, content: { application/json: { schema: { $ref: "#/components/schemas/DeploymentDetail" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /deployments/{deploymentId}/redeploy:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    post:
+      tags: [Deployments]
+      summary: Rebuild and release the same commit/config as this deployment
+      responses:
+        "202": { description: New deployment queued, content: { application/json: { schema: { $ref: "#/components/schemas/Deployment" } } } }
+        "409": { description: Build in progress, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/rollback:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    post:
+      tags: [Deployments]
+      summary: Roll back to this deployment ("Roll back to this")
+      description: Reuses the existing build image; no rebuild. Only allowed for deployments that previously succeeded.
+      responses:
+        "202": { description: Rollback deployment created, content: { application/json: { schema: { $ref: "#/components/schemas/Deployment" } } } }
+        "409": { description: Not rollback-eligible (`code=not_rollbackable`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/cancel:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    post:
+      tags: [Deployments]
+      summary: Cancel a queued or building deployment
+      responses:
+        "200": { description: Cancelled, content: { application/json: { schema: { $ref: "#/components/schemas/Deployment" } } } }
+        "409": { description: Already finished, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/logs:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    get:
+      tags: [Logs]
+      summary: Build + deploy logs for a deployment ("View build logs")
+      parameters:
+        - { name: phase, in: query, schema: { type: string, enum: [build, deploy, all], default: all } }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200": { description: Log lines oldest-first, content: { application/json: { schema: { $ref: "#/components/schemas/LogPage" } } } }
+  /deployments/{deploymentId}/logs/stream:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    get:
+      tags: [Logs]
+      summary: Live build logs (SSE). Stream ends with an `end` event carrying the final state.
+      responses:
+        "200":
+          description: "Events: `line` (LogLine), `phase` ({phase, status}), `end` ({state})"
+          content: { text/event-stream: { schema: { $ref: "#/components/schemas/LogLine" } } }
+
+  # ───────────────────────────── RUNTIME LOGS ─────────────────────────────
+  /environments/{environmentId}/logs:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Logs]
+      summary: Search runtime logs (Logs page and inspector Logs tab)
+      parameters:
+        - { name: serviceId, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true }
+        - { name: level, in: query, schema: { type: array, items: { $ref: "#/components/schemas/LogLevel" } }, style: form, explode: true }
+        - { name: q, in: query, schema: { type: string }, description: Free-text filter }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: direction, in: query, schema: { type: string, enum: [backward, forward], default: backward } }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200": { description: Log lines. Empty `data` → "No lines match.", content: { application/json: { schema: { $ref: "#/components/schemas/LogPage" } } } }
+  /environments/{environmentId}/logs/stream:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Logs]
+      summary: Live tail runtime logs (SSE) with the same filters as search
+      parameters:
+        - { name: serviceId, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true }
+        - { name: level, in: query, schema: { type: array, items: { $ref: "#/components/schemas/LogLevel" } }, style: form, explode: true }
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        "200": { description: "`line` events", content: { text/event-stream: { schema: { $ref: "#/components/schemas/LogLine" } } } }
+
+  # ───────────────────────────── METRICS ─────────────────────────────
+  /environments/{environmentId}/metrics:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Metrics]
+      summary: Aggregated metrics for the Metrics page
+      parameters:
+        - { $ref: "#/components/parameters/metricsRange" }
+        - { name: serviceId, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/metricsNames" }
+      responses:
+        "200": { description: Series, content: { application/json: { schema: { $ref: "#/components/schemas/MetricsResponse" } } } }
+  /services/{serviceId}/metrics:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Metrics]
+      summary: Service metrics (inspector Metrics tab)
+      parameters:
+        - { $ref: "#/components/parameters/metricsRange" }
+        - { $ref: "#/components/parameters/metricsNames" }
+      responses:
+        "200": { description: Series, content: { application/json: { schema: { $ref: "#/components/schemas/MetricsResponse" } } } }
+
+  # ───────────────────────────── VARIABLES ─────────────────────────────
+  /services/{serviceId}/variables:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Variables]
+      summary: Service variables (Variables tab). Secret values are masked unless `reveal=true`.
+      parameters:
+        - { name: reveal, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: Variables
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Variable" } }
+                  shared: { type: array, items: { $ref: "#/components/schemas/Variable" }, description: Inherited environment-level variables }
+                  hasUnappliedChanges: { type: boolean }
+    put:
+      tags: [Variables]
+      summary: Bulk replace variables (raw editor / .env paste)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [variables]
+              properties:
+                variables: { type: array, items: { $ref: "#/components/schemas/VariableInput" } }
+                redeploy: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/VariablesSaved" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+    post:
+      tags: [Variables]
+      summary: Add one variable
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/VariableInput" } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Variable" } } } }
+        "409": { description: Key exists, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /services/{serviceId}/variables/{key}:
+    parameters:
+      - { $ref: "#/components/parameters/serviceId" }
+      - { name: key, in: path, required: true, schema: { type: string, pattern: "^[A-Z_][A-Z0-9_]*$" } }
+    patch:
+      tags: [Variables]
+      summary: Edit a variable value or secret flag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: { type: string }
+                secret: { type: boolean }
+                newKey: { type: string }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Variable" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Variables]
+      summary: Delete a variable
+      responses: { "204": { description: Deleted } }
+  /services/{serviceId}/variables/references:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Variables]
+      summary: Reference variables other services expose (autocomplete for `${{ service.KEY }}`)
+      responses:
+        "200":
+          description: References
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        serviceId: { type: string }
+                        serviceName: { type: string }
+                        key: { type: string }
+                        expression: { type: string, example: "${{ postgres.DATABASE_URL }}" }
+  /environments/{environmentId}/variables:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Variables]
+      summary: Shared (environment-level) variables
+      parameters: [{ name: reveal, in: query, schema: { type: boolean, default: false } }]
+      responses:
+        "200": { description: Variables, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Variable" } } } } } } }
+    put:
+      tags: [Variables]
+      summary: Bulk replace shared variables
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [variables]
+              properties:
+                variables: { type: array, items: { $ref: "#/components/schemas/VariableInput" } }
+      responses:
+        "200": { $ref: "#/components/responses/VariablesSaved" }
+
+  # ───────────────────────────── DOMAINS & NETWORKING ─────────────────────────────
+  /environments/{environmentId}/domains:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Domains]
+      summary: All domains in the environment (Domains page)
+      parameters:
+        - { name: serviceId, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/DomainStatus" } }
+      responses:
+        "200": { description: Domains, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Domain" } } } } } } }
+  /services/{serviceId}/networking:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Domains]
+      summary: Networking tab — public domains, private hostname, exposed port
+      responses:
+        "200": { description: Networking, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
+    patch:
+      tags: [Domains]
+      summary: Change target port / toggle public exposure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetPort: { type: integer, minimum: 1, maximum: 65535 }
+                public: { type: boolean }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
+  /services/{serviceId}/domains:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Domains]
+      summary: Add a custom domain or generate a platform domain ("Generate domain")
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [kind]
+                  properties: { kind: { const: generated } }
+                - type: object
+                  required: [kind, host]
+                  properties:
+                    kind: { const: custom }
+                    host: { type: string, format: hostname }
+                    targetPort: { type: integer }
+      responses:
+        "201": { description: Created; custom domains start `pending` with DNS records to configure, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { description: Domain already in use, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /domains/{domainId}:
+    parameters: [{ name: domainId, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [Domains]
+      summary: Domain details with DNS instructions and TLS state
+      responses:
+        "200": { description: Domain, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+    patch:
+      tags: [Domains]
+      summary: Change target port
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { targetPort: { type: integer } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+    delete:
+      tags: [Domains]
+      summary: Remove domain
+      responses: { "204": { description: Removed } }
+  /domains/{domainId}/verify:
+    parameters: [{ name: domainId, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [Domains]
+      summary: Re-check DNS now ("Check again")
+      responses:
+        "200": { description: Current verification result, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+
+  # ───────────────────────────── GITHUB ─────────────────────────────
+  /integrations/github:
+    get:
+      tags: [GitHub]
+      summary: GitHub connection status for the current team
+      parameters: [{ name: teamId, in: query, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connected: { type: boolean }
+                  account: { type: [string, "null"] }
+                  installUrl: { type: string, format: uri, description: URL to install/configure the GitHub app }
+    delete:
+      tags: [GitHub]
+      summary: Disconnect GitHub from the team
+      parameters: [{ name: teamId, in: query, required: true, schema: { type: string } }]
+      responses: { "204": { description: Disconnected } }
+  /integrations/github/repos:
+    get:
+      tags: [GitHub]
+      summary: Repositories available to deploy (repo picker)
+      parameters:
+        - { name: teamId, in: query, required: true, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200":
+          description: Repos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Repo" } }
+                  nextCursor: { type: [string, "null"] }
+        "409": { description: GitHub not connected (`code=github_not_connected`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /integrations/github/repos/{owner}/{repo}/branches:
+    get:
+      tags: [GitHub]
+      summary: Branches for a repo (branch picker in service settings)
+      parameters:
+        - { name: owner, in: path, required: true, schema: { type: string } }
+        - { name: repo, in: path, required: true, schema: { type: string } }
+        - { name: teamId, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Branches, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { type: object, properties: { name: { type: string }, default: { type: boolean }, sha: { type: string } } } } } } } } }
+  /integrations/github/repos/{owner}/{repo}/detect:
+    get:
+      tags: [GitHub]
+      summary: Detect framework/build settings to pre-fill the new-service form
+      parameters:
+        - { name: owner, in: path, required: true, schema: { type: string } }
+        - { name: repo, in: path, required: true, schema: { type: string } }
+        - { name: teamId, in: query, required: true, schema: { type: string } }
+        - { name: branch, in: query, schema: { type: string } }
+        - { name: rootDirectory, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Detection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logo: { $ref: "#/components/schemas/LogoKey" }
+                  framework: { type: [string, "null"] }
+                  buildCommand: { type: [string, "null"] }
+                  startCommand: { type: [string, "null"] }
+                  port: { type: [integer, "null"] }
+                  suggestedVariables: { type: array, items: { type: string } }
+
+  # ───────────────────────────── AI ASSISTANT ─────────────────────────────
+  /projects/{projectId}/assistant/threads:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Assistant]
+      summary: Conversation threads (thread switcher + history)
+      parameters:
+        - { name: environmentId, in: query, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: archived, in: query, schema: { type: boolean, default: false } }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200":
+          description: Threads, most recently active first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Thread" } }
+                  nextCursor: { type: [string, "null"] }
+    post:
+      tags: [Assistant]
+      summary: Start a new thread ("New" / first message)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [environmentId]
+              properties:
+                environmentId: { type: string }
+                title: { type: string, description: Optional; server derives from first message otherwise }
+                context: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Thread" } } } }
+
+  /projects/{projectId}/assistant/suggestions:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Assistant]
+      summary: Suggested prompts for the empty assistant state, based on current environment state
+      parameters:
+        - { name: environmentId, in: query, required: true, schema: { type: string } }
+        - { name: serviceId, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Prompts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        text: { type: string, example: "Why did the latest deploy fail?" }
+                        context: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
+
+  /assistant/threads/{threadId}:
+    parameters: [{ $ref: "#/components/parameters/threadId" }]
+    get:
+      tags: [Assistant]
+      summary: Thread metadata
+      responses:
+        "200": { description: Thread, content: { application/json: { schema: { $ref: "#/components/schemas/Thread" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Assistant]
+      summary: Rename / archive a thread
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { title: { type: string }, archived: { type: boolean } } } } }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Thread" } } } }
+    delete:
+      tags: [Assistant]
+      summary: Delete a thread
+      responses: { "204": { description: Deleted } }
+
+  /assistant/threads/{threadId}/messages:
+    parameters: [{ $ref: "#/components/parameters/threadId" }]
+    get:
+      tags: [Assistant]
+      summary: Messages in a thread (paginated backwards from newest)
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { name: before, in: query, schema: { type: string }, description: Message ID cursor }
+      responses:
+        "200":
+          description: Messages oldest→newest within the page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Message" } }
+                  hasMore: { type: boolean }
+    post:
+      tags: [Assistant]
+      summary: Send a user message and stream the assistant reply
+      description: |
+        With `Accept: text/event-stream` the reply is streamed. With `application/json`
+        the server returns 202 and the frontend polls the assistant message by ID.
+        Stream events:
+        - `message.created` — { userMessage: Message, assistantMessageId }
+        - `delta` — { text } incremental assistant text
+        - `tool` — { name, status: running|done|error, summary } (e.g. "Reading logs for api")
+        - `action` — Action proposed by the assistant (requires user approval)
+        - `done` — { message: Message } final assistant message
+        - `error` — Error
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1, maxLength: 8000 }
+                context: { type: array, items: { $ref: "#/components/schemas/ContextRef" }, description: Items added with "+ Context" }
+      responses:
+        "200": { description: SSE stream, content: { text/event-stream: { schema: { $ref: "#/components/schemas/Message" } } } }
+        "202":
+          description: Accepted (non-streaming)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userMessage: { $ref: "#/components/schemas/Message" }
+                  assistantMessageId: { type: string }
+        "409": { description: A reply is still generating in this thread (`code=reply_in_progress`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "402": { $ref: "#/components/responses/PlanLimit" }
+
+  /assistant/messages/{messageId}:
+    parameters: [{ name: messageId, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [Assistant]
+      summary: Single message (poll for status when not streaming)
+      responses:
+        "200": { description: Message, content: { application/json: { schema: { $ref: "#/components/schemas/Message" } } } }
+  /assistant/messages/{messageId}/stop:
+    parameters: [{ name: messageId, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [Assistant]
+      summary: Stop a generating reply; keeps partial text
+      responses:
+        "200": { description: Stopped, content: { application/json: { schema: { $ref: "#/components/schemas/Message" } } } }
+  /assistant/messages/{messageId}/regenerate:
+    parameters: [{ name: messageId, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [Assistant]
+      summary: Regenerate an assistant reply (same stream format as sending)
+      responses:
+        "200": { description: SSE stream, content: { text/event-stream: { schema: { $ref: "#/components/schemas/Message" } } } }
+  /assistant/messages/{messageId}/feedback:
+    parameters: [{ name: messageId, in: path, required: true, schema: { type: string } }]
+    put:
+      tags: [Assistant]
+      summary: Thumbs up/down on a reply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: string, enum: [up, down] }
+                comment: { type: string }
+      responses: { "204": { description: Saved } }
+
+  /assistant/actions/{actionId}:
+    parameters: [{ $ref: "#/components/parameters/actionId" }]
+    get:
+      tags: [Assistant]
+      summary: Proposed action with its diff/preview
+      responses:
+        "200": { description: Action, content: { application/json: { schema: { $ref: "#/components/schemas/Action" } } } }
+  /assistant/actions/{actionId}/apply:
+    parameters: [{ $ref: "#/components/parameters/actionId" }]
+    post:
+      tags: [Assistant]
+      summary: Approve and apply an AI-proposed change
+      description: |
+        Applies the change to the project (e.g. set variables, add service, connect services,
+        redeploy, rollback). Resulting resources are returned so the canvas can update, and the
+        same changes are broadcast on the environment event stream.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                edits: { type: object, additionalProperties: true, description: Optional user edits to the proposed payload }
+      responses:
+        "200": { description: Applied (or partially applied — see `result.steps`), content: { application/json: { schema: { $ref: "#/components/schemas/Action" } } } }
+        "409": { description: Already applied/dismissed or project changed since proposal (`code=action_stale`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /assistant/actions/{actionId}/dismiss:
+    parameters: [{ $ref: "#/components/parameters/actionId" }]
+    post:
+      tags: [Assistant]
+      summary: Reject a proposed action
+      responses:
+        "200": { description: Dismissed, content: { application/json: { schema: { $ref: "#/components/schemas/Action" } } } }
+  /assistant/actions/{actionId}/revert:
+    parameters: [{ $ref: "#/components/parameters/actionId" }]
+    post:
+      tags: [Assistant]
+      summary: Undo an applied action where reversible
+      responses:
+        "200": { description: Reverted, content: { application/json: { schema: { $ref: "#/components/schemas/Action" } } } }
+        "409": { description: Not reversible, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  # ───────────────────────────── ACTIVITY ─────────────────────────────
+  /projects/{projectId}/activity:
+    parameters: [{ $ref: "#/components/parameters/projectId" }]
+    get:
+      tags: [Activity]
+      summary: Audit/activity feed (who changed what)
+      parameters:
+        - { name: environmentId, in: query, schema: { type: string } }
+        - { name: serviceId, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200":
+          description: Activity newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/ActivityItem" } }
+                  nextCursor: { type: [string, "null"] }
+
+  # ───────────────────────────── NOTIFICATIONS ─────────────────────────────
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Notification inbox
+      parameters:
+        - { name: unread, in: query, schema: { type: boolean } }
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+                  nextCursor: { type: [string, "null"] }
+                  unreadCount: { type: integer }
+  /notifications/read:
+    post:
+      tags: [Notifications]
+      summary: Mark notifications read (specific IDs or all)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids: { type: array, items: { type: string } }
+                all: { type: boolean }
+      responses: { "204": { description: Marked } }
+  /notifications/stream:
+    get:
+      tags: [Notifications]
+      summary: SSE of new notifications for the badge
+      responses:
+        "200": { description: "`notification` events", content: { text/event-stream: { schema: { $ref: "#/components/schemas/Notification" } } } }
+
+  # ───────────────────────────── SEARCH ─────────────────────────────
+  /search:
+    get:
+      tags: [Search]
+      summary: Global command-palette search across projects, services, deployments, domains
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: teamId, in: query, required: true, schema: { type: string } }
+        - { name: projectId, in: query, schema: { type: string } }
+        - { name: types, in: query, schema: { type: array, items: { type: string, enum: [project, service, deployment, domain, variable] } }, style: form, explode: true }
+        - { name: limit, in: query, schema: { type: integer, default: 10, maximum: 50 } }
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Access token from `Session.accessToken`.
+
+  parameters:
+    teamId: { name: teamId, in: path, required: true, schema: { type: string } }
+    projectId: { name: projectId, in: path, required: true, schema: { type: string } }
+    environmentId: { name: environmentId, in: path, required: true, schema: { type: string } }
+    serviceId: { name: serviceId, in: path, required: true, schema: { type: string } }
+    deploymentId: { name: deploymentId, in: path, required: true, schema: { type: string } }
+    threadId: { name: threadId, in: path, required: true, schema: { type: string } }
+    actionId: { name: actionId, in: path, required: true, schema: { type: string } }
+    limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+    cursor: { name: cursor, in: query, schema: { type: string }, description: Opaque cursor from `nextCursor` }
+    idempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+    metricsRange:
+      name: range
+      in: query
+      schema: { type: string, enum: [1h, 6h, 24h, 7d, 30d], default: 1h }
+    metricsNames:
+      name: metrics
+      in: query
+      style: form
+      explode: false
+      schema:
+        type: array
+        items: { type: string, enum: [cpu, memory, network_in, network_out, requests, latency_p50, latency_p95, error_rate, disk] }
+
+  responses:
+    Unauthorized:
+      description: Missing/invalid session (`code=unauthorized`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: Authenticated but lacks role (`code=forbidden`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Resource not found or not visible (`code=not_found`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: Duplicate name/key or state conflict (`code=conflict`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    ValidationError:
+      description: Invalid input (`code=validation_failed`, `fields` populated)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    RateLimited:
+      description: Too many requests (`code=rate_limited`); `Retry-After` header set
+      headers: { Retry-After: { schema: { type: integer } } }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    PlanLimit:
+      description: Plan or spend limit reached (`code=plan_limit` or `spend_limit_reached`)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    VariablesSaved:
+      description: Saved. Running services keep old values until redeploy.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data: { type: array, items: { $ref: "#/components/schemas/Variable" } }
+              affectedServiceIds: { type: array, items: { type: string } }
+              deployments: { type: array, items: { $ref: "#/components/schemas/Deployment" }, description: Present when `redeploy=true` }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: validation_failed }
+        message: { type: string, description: "Human-readable, safe to show in a toast" }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: Field → message for form errors
+        details: { type: object, additionalProperties: true }
+        requestId: { type: string }
+
+    # Auth & users
+    Session:
+      type: object
+      required: [accessToken, refreshToken, expiresAt]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+    AuthResult:
+      type: object
+      required: [user, session]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        session: { $ref: "#/components/schemas/Session" }
+    SessionInfo:
+      type: object
+      properties:
+        id: { type: string }
+        current: { type: boolean }
+        userAgent: { type: string }
+        ip: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastActiveAt: { type: string, format: date-time }
+    User:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        emailVerified: { type: boolean }
+        name: { type: string }
+        username: { type: [string, "null"] }
+        avatarUrl: { type: [string, "null"], format: uri }
+        createdAt: { type: string, format: date-time }
+    Me:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            teams: { type: array, items: { $ref: "#/components/schemas/Team" } }
+            defaultTeamId: { type: [string, "null"] }
+            onboarding: { $ref: "#/components/schemas/OnboardingState" }
+            githubConnected: { type: boolean }
+    OnboardingState:
+      type: object
+      properties:
+        teamCreated: { type: boolean }
+        githubConnected: { type: boolean }
+        firstProjectCreated: { type: boolean }
+        firstDeploySucceeded: { type: boolean }
+        dismissed: { type: boolean }
+    UserSettings:
+      type: object
+      properties:
+        theme: { type: string, enum: [system, light, dark] }
+        defaultTeamId: { type: [string, "null"] }
+        canvasSnapToGrid: { type: boolean }
+        timezone: { type: string, example: Africa/Accra }
+        emailNotifications:
+          type: object
+          properties:
+            deployFailed: { type: boolean }
+            serviceCrashed: { type: boolean }
+            domainIssues: { type: boolean }
+            spendLimit: { type: boolean }
+            invites: { type: boolean }
+
+    # Teams
+    Role: { type: string, enum: [owner, admin, member, viewer] }
+    Team:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id: { type: string }
+        name: { type: string, example: Acme Labs }
+        slug: { type: string }
+        plan: { type: string, enum: [hobby, pro, team] }
+        role: { $ref: "#/components/schemas/Role" }
+        memberCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+    Member:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        role: { $ref: "#/components/schemas/Role" }
+        joinedAt: { type: string, format: date-time }
+    Invite:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        invitedBy: { $ref: "#/components/schemas/UserRef" }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    UserRef:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        username: { type: [string, "null"] }
+        avatarUrl: { type: [string, "null"] }
+
+    # Projects
+    ProjectHealth: { type: string, enum: [healthy, deploying, degraded, sleeping, empty] }
+    Region:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, example: eu-west }
+        name: { type: string, example: Europe West }
+        countryCode: { type: string, example: EU, description: Used to pick the flag on cards }
+        available: { type: boolean }
+    ProjectSettings:
+      type: object
+      properties:
+        prEnvironments: { type: boolean, description: Create preview environments for pull requests }
+        spendLimitUsd: { type: [number, "null"], description: Services sleep when reached }
+        defaultRegion: { type: string }
+        baseEnvironmentId: { type: string, description: Environment PR previews fork from }
+    Project:
+      type: object
+      required: [id, teamId, name, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        teamId: { type: string }
+        name: { type: string, example: harbor-api }
+        description: { type: [string, "null"] }
+        settings: { $ref: "#/components/schemas/ProjectSettings" }
+        defaultEnvironmentId: { type: string }
+        favorite: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProjectSummary:
+      allOf:
+        - $ref: "#/components/schemas/Project"
+        - type: object
+          properties:
+            health: { $ref: "#/components/schemas/ProjectHealth" }
+            region: { $ref: "#/components/schemas/Region" }
+            environmentName: { type: string, example: production }
+            serviceCount: { type: integer }
+            onlineServiceCount: { type: integer }
+            latencyMs: { type: [number, "null"], description: "p50 of public services, last 5 min" }
+            lastDeployAt: { type: [string, "null"], format: date-time }
+            preview:
+              type: object
+              description: Mini canvas for the card thumbnail
+              properties:
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      serviceId: { type: string }
+                      name: { type: string }
+                      logo: { $ref: "#/components/schemas/LogoKey" }
+                      status: { $ref: "#/components/schemas/ServiceStatus" }
+                      x: { type: number }
+                      y: { type: number }
+                edges:
+                  type: array
+                  items: { type: object, properties: { from: { type: string }, to: { type: string } } }
+    CreateProjectInput:
+      type: object
+      required: [name, source]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        description: { type: string }
+        region: { type: string }
+        source: { type: string, enum: [empty, github, template, database, docker] }
+        github:
+          type: object
+          description: Required when source=github
+          required: [repo]
+          properties:
+            repo: { type: string, example: acme/harbor-api }
+            branch: { type: string }
+            rootDirectory: { type: string }
+        templateId: { type: string, description: Required when source=template or database }
+        image: { type: string, description: "Required when source=docker, e.g. redis:7-alpine" }
+    UpdateProjectInput:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: [string, "null"] }
+        settings: { $ref: "#/components/schemas/ProjectSettings" }
+
+    Environment:
+      type: object
+      required: [id, projectId, name]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        name: { type: string, example: production }
+        type: { type: string, enum: [production, staging, preview, custom] }
+        protected: { type: boolean }
+        pullRequest: { type: [integer, "null"], description: Set for PR preview environments }
+        forkedFromEnvironmentId: { type: [string, "null"] }
+        serviceCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    # Canvas & services
+    LogoKey:
+      type: string
+      enum: [docker, github, go, js, metabase, mongodb, mysql, n8n, nextjs, postgres, python, redis, rust, sqlite, strapi, vite]
+    ServiceKind: { type: string, enum: [app, database, worker, cron] }
+    ServiceStatus: { type: string, enum: [online, deploying, crashed, sleeping, queued, removed] }
+    Position:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: number }
+        y: { type: number }
+    Canvas:
+      type: object
+      required: [environmentId, revision, services, connections]
+      properties:
+        environmentId: { type: string }
+        revision: { type: integer }
+        services: { type: array, items: { $ref: "#/components/schemas/Service" } }
+        connections: { type: array, items: { $ref: "#/components/schemas/Connection" } }
+        viewport:
+          type: [object, "null"]
+          description: Last saved viewport for the current user
+          properties:
+            x: { type: number }
+            y: { type: number }
+            zoom: { type: number }
+    ServiceSource:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [github, image, template] }
+        repo: { type: string, example: acme/harbor-api }
+        branch: { type: string, example: main }
+        rootDirectory: { type: string, example: workers/ }
+        image: { type: string, example: postgres:16 }
+        templateId: { type: string }
+        display: { type: string, example: "acme/harbor-api · main", description: Pre-formatted label for the UI }
+    Service:
+      type: object
+      required: [id, environmentId, name, kind, logo, status, position]
+      properties:
+        id: { type: string }
+        environmentId: { type: string }
+        name: { type: string }
+        kind: { $ref: "#/components/schemas/ServiceKind" }
+        logo: { $ref: "#/components/schemas/LogoKey" }
+        status: { $ref: "#/components/schemas/ServiceStatus" }
+        position: { $ref: "#/components/schemas/Position" }
+        source: { $ref: "#/components/schemas/ServiceSource" }
+        region: { type: string }
+        replicas: { type: integer, minimum: 0 }
+        port: { type: [integer, "null"] }
+        primaryDomain: { type: [string, "null"] }
+        volume:
+          type: [object, "null"]
+          properties:
+            name: { type: string }
+            usedGb: { type: number }
+            sizeGb: { type: number }
+        usage:
+          type: object
+          properties:
+            cpu: { type: number, description: vCPU in use }
+            memoryMb: { type: number }
+        activeDeployment:
+          type: [object, "null"]
+          properties:
+            id: { type: string }
+            sha: { type: string }
+            finishedAt: { type: string, format: date-time }
+        buildingDeployment:
+          type: [object, "null"]
+          properties:
+            id: { type: string }
+            sha: { type: string }
+            progress: { type: number }
+        cronSchedule: { type: [string, "null"], example: "0 3 * * *" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ServiceDetail:
+      allOf:
+        - $ref: "#/components/schemas/Service"
+        - type: object
+          properties:
+            settings: { $ref: "#/components/schemas/ServiceSettings" }
+            topology:
+              type: object
+              description: Deploys-tab summary
+              properties:
+                privateEndpoint: { type: string, example: "api.railway.internal:8080" }
+                publicEndpoints: { type: array, items: { type: string } }
+                dependencies: { type: array, items: { $ref: "#/components/schemas/ServiceRef" } }
+                consumers: { type: array, items: { $ref: "#/components/schemas/ServiceRef" } }
+    ServiceRef:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        logo: { $ref: "#/components/schemas/LogoKey" }
+        status: { $ref: "#/components/schemas/ServiceStatus" }
+        via: { type: string, example: "tcp :5432" }
+    ServiceSettings:
+      type: object
+      properties:
+        branch: { type: string }
+        rootDirectory: { type: string }
+        autoDeploy: { type: boolean, description: Deploy on every push }
+        buildCommand: { type: [string, "null"] }
+        startCommand: { type: [string, "null"] }
+        dockerfilePath: { type: [string, "null"] }
+        healthcheckPath: { type: [string, "null"] }
+        healthcheckTimeoutSec: { type: integer }
+        restartPolicy: { type: string, enum: [always, on_failure, never] }
+        replicas: { type: integer, minimum: 0, maximum: 50 }
+        region: { type: string }
+        cpuLimit: { type: number }
+        memoryLimitMb: { type: integer }
+        cronSchedule: { type: [string, "null"] }
+        sleepWhenIdle: { type: boolean }
+    CreateServiceInput:
+      type: object
+      required: [source]
+      properties:
+        name: { type: string, description: Defaults from template/repo }
+        templateId: { type: string }
+        source: { $ref: "#/components/schemas/ServiceSource" }
+        position: { $ref: "#/components/schemas/Position" }
+        settings: { $ref: "#/components/schemas/ServiceSettings" }
+        variables: { type: array, items: { $ref: "#/components/schemas/VariableInput" } }
+        deploy: { type: boolean, default: true }
+    UpdateServiceInput:
+      type: object
+      properties:
+        name: { type: string }
+        logo: { $ref: "#/components/schemas/LogoKey" }
+        source: { $ref: "#/components/schemas/ServiceSource" }
+        settings: { $ref: "#/components/schemas/ServiceSettings" }
+    Volume:
+      type: object
+      properties:
+        id: { type: string }
+        serviceId: { type: string }
+        name: { type: string, example: pg-data }
+        mountPath: { type: string }
+        sizeGb: { type: number }
+        usedGb: { type: number }
+        createdAt: { type: string, format: date-time }
+    Connection:
+      type: object
+      required: [id, fromServiceId, toServiceId]
+      properties:
+        id: { type: string }
+        environmentId: { type: string }
+        fromServiceId: { type: string }
+        toServiceId: { type: string }
+        protocol: { type: string, enum: [http, tcp, queue] }
+        port: { type: [integer, "null"] }
+        label: { type: string, example: "tcp :5432" }
+    Template:
+      type: object
+      required: [id, name, logo, kind, group]
+      properties:
+        id: { type: string }
+        name: { type: string, example: PostgreSQL }
+        logo: { $ref: "#/components/schemas/LogoKey" }
+        kind: { $ref: "#/components/schemas/ServiceKind" }
+        group: { type: string, enum: [Source, Databases, Starters, Apps] }
+        hint: { type: string, example: With persistent volume }
+        inputs:
+          type: array
+          description: Fields the dialog must collect before creation
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              type: { type: string, enum: [string, secret, number, boolean, select] }
+              required: { type: boolean }
+              default: {}
+              options: { type: array, items: { type: string } }
+
+    # Deployments
+    DeploymentState: { type: string, enum: [queued, building, deploying, active, failed, crashed, cancelled, removed] }
+    DeploymentTrigger: { type: string, enum: [push, manual, rollback, config_change, assistant, template] }
+    Deployment:
+      type: object
+      required: [id, serviceId, state, createdAt]
+      properties:
+        id: { type: string }
+        serviceId: { type: string }
+        serviceName: { type: string }
+        environmentId: { type: string }
+        state: { $ref: "#/components/schemas/DeploymentState" }
+        trigger: { $ref: "#/components/schemas/DeploymentTrigger" }
+        commit:
+          type: [object, "null"]
+          properties:
+            sha: { type: string, example: a41c9e2 }
+            message: { type: string }
+            author: { type: string }
+            url: { type: string, format: uri }
+        image: { type: [string, "null"] }
+        createdBy: { oneOf: [{ $ref: "#/components/schemas/UserRef" }, { type: "null" }] }
+        rollbackOfDeploymentId: { type: [string, "null"] }
+        rollbackable: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        durationSec: { type: [integer, "null"] }
+        errorSummary: { type: [string, "null"], description: Short failure reason for failed/crashed }
+    DeploymentDetail:
+      allOf:
+        - $ref: "#/components/schemas/Deployment"
+        - type: object
+          properties:
+            phases:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string, enum: [initialize, build, deploy, healthcheck, release] }
+                  status: { type: string, enum: [pending, running, succeeded, failed, skipped] }
+                  startedAt: { type: [string, "null"], format: date-time }
+                  finishedAt: { type: [string, "null"], format: date-time }
+            url: { type: [string, "null"], description: Deployment-specific URL }
+    DeploymentPage:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Deployment" } }
+        nextCursor: { type: [string, "null"] }
+
+    # Logs & metrics
+    LogLevel: { type: string, enum: [debug, info, warn, error] }
+    LogLine:
+      type: object
+      required: [timestamp, level, message]
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        serviceId: { type: string }
+        serviceName: { type: string }
+        deploymentId: { type: [string, "null"] }
+        replica: { type: [string, "null"] }
+        level: { $ref: "#/components/schemas/LogLevel" }
+        message: { type: string }
+        attributes: { type: object, additionalProperties: true }
+    LogPage:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/LogLine" } }
+        nextCursor: { type: [string, "null"] }
+        truncated: { type: boolean, description: True when retention cut off older lines }
+    MetricsResponse:
+      type: object
+      properties:
+        range: { type: string }
+        stepSec: { type: integer }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              metric: { type: string }
+              unit: { type: string, example: vCPU }
+              serviceId: { type: [string, "null"] }
+              points:
+                type: array
+                items: { type: array, prefixItems: [{ type: string, format: date-time }, { type: [number, "null"] }], minItems: 2, maxItems: 2 }
+              current: { type: [number, "null"] }
+              limit: { type: [number, "null"] }
+        partial: { type: boolean, description: Some services had no data in range }
+
+    # Variables
+    Variable:
+      type: object
+      required: [key, value, secret, isReference]
+      properties:
+        key: { type: string }
+        value: { type: string, description: Masked (`••••`) unless revealed or not secret }
+        secret: { type: boolean }
+        isReference: { type: boolean, description: "Value is a reference like ${{ postgres.DATABASE_URL }}" }
+        resolvedPreview: { type: [string, "null"], description: Masked resolved value for references }
+        source: { type: string, enum: [user, template, connection, platform, shared] }
+        updatedAt: { type: string, format: date-time }
+    VariableInput:
+      type: object
+      required: [key, value]
+      properties:
+        key: { type: string, pattern: "^[A-Z_][A-Z0-9_]*$" }
+        value: { type: string }
+        secret: { type: boolean, default: false }
+
+    # Domains
+    DomainStatus: { type: string, enum: [pending, verifying, active, failed] }
+    Domain:
+      type: object
+      required: [id, host, kind, status]
+      properties:
+        id: { type: string }
+        host: { type: string, example: api.acme.dev }
+        serviceId: { type: string }
+        serviceName: { type: string }
+        kind: { type: string, enum: [custom, generated] }
+        status: { $ref: "#/components/schemas/DomainStatus" }
+        targetPort: { type: [integer, "null"] }
+        tls:
+          type: object
+          properties:
+            status: { type: string, enum: [managed, issuing, valid, expiring, failed] }
+            expiresAt: { type: [string, "null"], format: date-time }
+            label: { type: string, example: "Valid · renews in 61d" }
+        dnsRecords:
+          type: array
+          description: Records the user must add (custom domains)
+          items:
+            type: object
+            properties:
+              type: { type: string, enum: [CNAME, A, TXT] }
+              name: { type: string }
+              value: { type: string }
+              verified: { type: boolean }
+        lastCheckedAt: { type: [string, "null"], format: date-time }
+        error: { type: [string, "null"] }
+    Networking:
+      type: object
+      properties:
+        public: { type: boolean }
+        targetPort: { type: [integer, "null"] }
+        domains: { type: array, items: { $ref: "#/components/schemas/Domain" } }
+        privateHostname: { type: string, example: api.moorline.internal }
+        privatePort: { type: [integer, "null"] }
+
+    # GitHub
+    Repo:
+      type: object
+      properties:
+        fullName: { type: string, example: acme/harbor-api }
+        private: { type: boolean }
+        defaultBranch: { type: string }
+        updatedAt: { type: string, format: date-time }
+        alreadyDeployedIn: { type: array, items: { type: string }, description: Project IDs using this repo }
+
+    # Assistant
+    ContextRef:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [service, deployment, log_range, variable, domain, environment] }
+        id: { type: string }
+        label: { type: string, example: "api · a41c9e2" }
+        from: { type: string, format: date-time, description: For log_range }
+        to: { type: string, format: date-time }
+    Thread:
+      type: object
+      required: [id, projectId, environmentId, title]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        environmentId: { type: string }
+        environmentName: { type: string }
+        title: { type: string, example: Deploy failure in api }
+        archived: { type: boolean }
+        messageCount: { type: integer }
+        lastMessagePreview: { type: [string, "null"] }
+        pendingActionCount: { type: integer }
+        createdBy: { $ref: "#/components/schemas/UserRef" }
+        createdAt: { type: string, format: date-time }
+        lastActivityAt: { type: string, format: date-time }
+    Message:
+      type: object
+      required: [id, threadId, role, status, createdAt]
+      properties:
+        id: { type: string }
+        threadId: { type: string }
+        role: { type: string, enum: [user, assistant] }
+        status: { type: string, enum: [pending, streaming, complete, stopped, error] }
+        content: { type: string, description: Markdown }
+        context: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
+        toolCalls:
+          type: array
+          description: Steps shown as "Reading logs…" chips
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              status: { type: string, enum: [running, done, error] }
+              summary: { type: string }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/ContextRef" }
+        actions: { type: array, items: { $ref: "#/components/schemas/Action" } }
+        error: { oneOf: [{ $ref: "#/components/schemas/Error" }, { type: "null" }] }
+        feedback: { type: [string, "null"], enum: [up, down, null] }
+        author: { oneOf: [{ $ref: "#/components/schemas/UserRef" }, { type: "null" }] }
+        createdAt: { type: string, format: date-time }
+    Action:
+      type: object
+      required: [id, messageId, type, status, title]
+      properties:
+        id: { type: string }
+        messageId: { type: string }
+        threadId: { type: string }
+        type:
+          type: string
+          enum: [set_variables, delete_variables, create_service, update_service_settings, delete_service, create_connection, delete_connection, redeploy, rollback, restart_service, add_domain, scale_service]
+        status: { type: string, enum: [proposed, applying, applied, partially_applied, failed, dismissed, reverted, stale] }
+        title: { type: string, example: "Set DATABASE_URL on api and redeploy" }
+        description: { type: string }
+        risk: { type: string, enum: [low, medium, high], description: "High = destructive, UI asks for confirmation" }
+        reversible: { type: boolean }
+        targets: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
+        payload: { type: object, additionalProperties: true, description: "Request body that will be applied, same shape as the corresponding endpoint" }
+        diff:
+          type: array
+          description: Human-readable before/after for the preview
+          items:
+            type: object
+            properties:
+              path: { type: string, example: "api.variables.DATABASE_URL" }
+              before: { type: [string, "null"] }
+              after: { type: [string, "null"] }
+        result:
+          type: [object, "null"]
+          properties:
+            steps:
+              type: array
+              items:
+                type: object
+                properties:
+                  description: { type: string }
+                  status: { type: string, enum: [succeeded, failed, skipped] }
+                  error: { type: [string, "null"] }
+            createdServiceIds: { type: array, items: { type: string } }
+            deploymentIds: { type: array, items: { type: string } }
+            canvasRevision: { type: integer }
+        appliedBy: { oneOf: [{ $ref: "#/components/schemas/UserRef" }, { type: "null" }] }
+        appliedAt: { type: [string, "null"], format: date-time }
+
+    # Activity, notifications, search, events
+    ActivityItem:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, example: variable.updated }
+        actor: { oneOf: [{ $ref: "#/components/schemas/UserRef" }, { type: "null" }] }
+        actorType: { type: string, enum: [user, system, assistant, github] }
+        summary: { type: string, example: "ada updated 2 variables on api" }
+        projectId: { type: string }
+        environmentId: { type: [string, "null"] }
+        serviceId: { type: [string, "null"] }
+        targetUrl: { type: [string, "null"], description: Frontend path to open }
+        createdAt: { type: string, format: date-time }
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [deploy_failed, deploy_succeeded, service_crashed, domain_active, domain_failed, spend_limit, invite, assistant_action] }
+        title: { type: string }
+        body: { type: string }
+        projectId: { type: [string, "null"] }
+        targetUrl: { type: [string, "null"] }
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    SearchResult:
+      type: object
+      properties:
+        type: { type: string, enum: [project, service, deployment, domain, variable] }
+        id: { type: string }
+        title: { type: string }
+        subtitle: { type: string }
+        logo: { oneOf: [{ $ref: "#/components/schemas/LogoKey" }, { type: "null" }] }
+        projectId: { type: string }
+        environmentId: { type: [string, "null"] }
+        targetUrl: { type: string }
+    EnvironmentEvent:
+      type: object
+      required: [type, at]
+      properties:
+        type: { type: string }
+        at: { type: string, format: date-time }
+        actorId: { type: [string, "null"] }
+        canvasRevision: { type: [integer, "null"] }
+        data: { type: object, additionalProperties: true, description: "The affected resource (Service, Deployment, Connection, Domain or Action)" }

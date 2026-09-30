@@ -1,0 +1,9 @@
+# Railway Nixpacks Configuration for Moorline Backend
+[phases.setup]
+nixPkgs = ["nodejs_20", "cloudflared"]
+
+[phases.install]
+cmds = ["npm ci --omit=dev"]
+
+[start]
+cmd = "node src/index.js"

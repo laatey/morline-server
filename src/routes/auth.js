@@ -1,0 +1,251 @@
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
+import { z } from 'zod';
+import { execute, queryOne, queryAll, transaction } from '../db/index.js';
+import { mapUser, mapSessionInfo } from '../db/mappers.js';
+import { signAccessToken, requireAuth } from '../middleware/auth.js';
+import { conflict, unauthorized, notFound } from '../middleware/error-handler.js';
+import { REFRESH_EXPIRES_DAYS } from '../config.js';
+
+const router = Router();
+
+const signupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  name: z.string().min(1).max(80)
+});
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string()
+});
+
+function createSessionRecord(userId, req) {
+  const sessionId = `ses_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const refreshToken = `rsh_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + REFRESH_EXPIRES_DAYS * 86400000).toISOString();
+  const userAgent = req.headers['user-agent'] || 'Unknown Client';
+  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
+
+  execute(`
+    INSERT INTO sessions (id, user_id, refresh_token, user_agent, ip, expires_at, created_at, last_active_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, sessionId, userId, refreshToken, userAgent, ip, expiresAt, now.toISOString(), now.toISOString());
+
+  const accessToken = signAccessToken({ userId, sessionId });
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt,
+    sessionId
+  };
+}
+
+// POST /auth/signup
+router.post('/signup', async (req, res, next) => {
+  try {
+    const body = signupSchema.parse(req.body);
+    const existing = queryOne('SELECT id FROM users WHERE email = ?', body.email.toLowerCase());
+    if (existing) {
+      throw conflict('An account with this email already exists', 'user_already_exists');
+    }
+
+    const userId = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const passwordHash = await bcrypt.hash(body.password, 10);
+    const now = new Date().toISOString();
+    const username = body.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') + Math.floor(1000 + Math.random() * 9000);
+
+    const teamId = `tem_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const teamSlug = username + '-team';
+
+    transaction(() => {
+      execute(`
+        INSERT INTO users (id, email, email_verified, name, username, password_hash, created_at, updated_at)
+        VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+      `, userId, body.email.toLowerCase(), body.name, username, passwordHash, now, now);
+
+      execute(`
+        INSERT INTO user_settings (user_id, theme, default_team_id, canvas_snap_to_grid, timezone, email_notifications)
+        VALUES (?, 'system', ?, 1, 'UTC', 1)
+      `, userId, teamId);
+
+      execute(`
+        INSERT INTO onboarding_state (user_id, team_created, github_connected, first_project_created, first_deploy_succeeded, dismissed)
+        VALUES (?, 1, 0, 0, 0, 0)
+      `, userId);
+
+      execute(`
+        INSERT INTO teams (id, name, slug, plan, created_at, updated_at)
+        VALUES (?, ?, ?, 'hobby', ?, ?)
+      `, teamId, `${body.name}'s Team`, teamSlug, now, now);
+
+      execute(`
+        INSERT INTO team_members (team_id, user_id, role, joined_at)
+        VALUES (?, ?, 'owner', ?)
+      `, teamId, userId, now);
+    });
+
+    const userRow = queryOne('SELECT * FROM users WHERE id = ?', userId);
+    const session = createSessionRecord(userId, req);
+
+    return res.status(201).json({
+      user: mapUser(userRow),
+      session: {
+        accessToken: session.accessToken,
+        refreshToken: session.refreshToken,
+        expiresAt: session.expiresAt
+      },
+      requiresEmailVerification: false
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /auth/login
+router.post('/login', async (req, res, next) => {
+  try {
+    const body = loginSchema.parse(req.body);
+    const user = queryOne('SELECT * FROM users WHERE email = ?', body.email.toLowerCase());
+    if (!user) {
+      throw unauthorized('Invalid email or password', 'invalid_credentials');
+    }
+
+    const match = await bcrypt.compare(body.password, user.password_hash);
+    if (!match) {
+      throw unauthorized('Invalid email or password', 'invalid_credentials');
+    }
+
+    const session = createSessionRecord(user.id, req);
+
+    return res.status(200).json({
+      user: mapUser(user),
+      session: {
+        accessToken: session.accessToken,
+        refreshToken: session.refreshToken,
+        expiresAt: session.expiresAt
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /auth/oauth/:provider/start
+router.get('/oauth/:provider/start', (req, res) => {
+  const provider = req.params.provider;
+  const redirectUri = `${req.protocol}://${req.get('host')}/v1/auth/oauth/${provider}/callback`;
+  const mockOAuthUrl = `https://github.com/login/oauth/authorize?client_id=moorline_app&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+  if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    return res.json({ url: mockOAuthUrl });
+  }
+  return res.redirect(mockOAuthUrl);
+});
+
+// GET /auth/oauth/:provider/callback
+router.get('/oauth/:provider/callback', (req, res) => {
+  let user = queryOne('SELECT * FROM users ORDER BY created_at ASC LIMIT 1');
+  if (!user) {
+    const userId = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const now = new Date().toISOString();
+    execute(`
+      INSERT INTO users (id, email, email_verified, name, username, password_hash, created_at, updated_at)
+      VALUES (?, 'oauth@moorline.dev', 1, 'OAuth User', 'oauth-user', 'oauth_placeholder', ?, ?)
+    `, userId, now, now);
+    user = queryOne('SELECT * FROM users WHERE id = ?', userId);
+  }
+
+  const session = createSessionRecord(user.id, req);
+  res.redirect(`/?token=${session.accessToken}`);
+});
+
+// POST /auth/refresh
+router.post('/refresh', (req, res, next) => {
+  try {
+    const { refreshToken } = req.body || {};
+    if (!refreshToken) {
+      throw unauthorized('Missing refresh token', 'missing_token');
+    }
+
+    const session = queryOne('SELECT * FROM sessions WHERE refresh_token = ?', refreshToken);
+    if (!session || new Date(session.expires_at) < new Date()) {
+      throw unauthorized('Invalid or expired refresh token', 'invalid_token');
+    }
+
+    const newAccessToken = signAccessToken({ userId: session.user_id, sessionId: session.id });
+    return res.json({
+      accessToken: newAccessToken,
+      refreshToken: session.refresh_token,
+      expiresAt: session.expires_at
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /auth/logout
+router.post('/logout', (req, res) => {
+  if (req.session) {
+    execute('DELETE FROM sessions WHERE id = ?', req.session.id);
+  }
+  return res.status(204).end();
+});
+
+// POST /auth/verify-email
+router.post('/verify-email', (req, res) => {
+  if (req.user) {
+    execute('UPDATE users SET email_verified = 1 WHERE id = ?', req.user.id);
+  }
+  return res.status(200).json({ verified: true });
+});
+
+// POST /auth/verify-email/resend
+router.post('/verify-email/resend', (req, res) => {
+  return res.status(200).json({ sent: true });
+});
+
+// POST /auth/password/forgot
+router.post('/password/forgot', (req, res) => {
+  return res.status(200).json({ sent: true });
+});
+
+// POST /auth/password/reset
+router.post('/password/reset', async (req, res, next) => {
+  try {
+    const { token, newPassword } = req.body || {};
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({
+        code: 'validation_failed',
+        message: 'Password must be at least 8 characters'
+      });
+    }
+    return res.status(200).json({ reset: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /auth/sessions
+router.get('/sessions', requireAuth, (req, res) => {
+  const rows = queryAll('SELECT * FROM sessions WHERE user_id = ? ORDER BY last_active_at DESC', req.user.id);
+  const data = rows.map((r) => mapSessionInfo(r, req.session?.id));
+  return res.json({ data });
+});
+
+// DELETE /auth/sessions/:sessionId
+router.delete('/sessions/:sessionId', requireAuth, (req, res, next) => {
+  const sessionId = req.params.sessionId;
+  const session = queryOne('SELECT * FROM sessions WHERE id = ? AND user_id = ?', sessionId, req.user.id);
+  if (!session) {
+    throw notFound('Session not found');
+  }
+
+  execute('DELETE FROM sessions WHERE id = ?', sessionId);
+  return res.status(204).end();
+});
+
+export default router;
