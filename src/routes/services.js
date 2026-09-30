@@ -9,6 +9,7 @@ import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { BASE_DOMAIN } from '../config.js';
+import { createStagedChange } from '../services/staged-changes-helper.js';
 
 const router = Router();
 router.use('/services', requireAuth);
@@ -145,6 +146,17 @@ router.patch('/services/:serviceId', (req, res, next) => {
       canvasRevision: null,
       data: detail
     });
+
+    if (updates.length > 0 || settings) {
+      createStagedChange({
+        environmentId: service.environment_id,
+        serviceId: service.id,
+        serviceName: service.name,
+        type: 'settings',
+        summary: `Updated service settings/configuration`,
+        payload: { action: 'update' }
+      });
+    }
 
     return res.json(detail);
   } catch (err) {
@@ -466,6 +478,14 @@ router.put('/services/:serviceId/variables', (req, res, next) => {
     });
 
     const rows = queryAll('SELECT * FROM variables WHERE scope_type = ? AND scope_id = ? ORDER BY key ASC', 'service', service.id);
+    createStagedChange({
+      environmentId: service.environment_id,
+      serviceId: service.id,
+      serviceName: service.name,
+      type: 'variable',
+      summary: `Updated ${variables.length} variable${variables.length !== 1 ? 's' : ''} (bulk replace)`,
+      payload: { action: 'bulk_replace' }
+    });
     return res.json({ data: rows.map(mapVariable) });
   } catch (err) {
     next(err);
@@ -491,6 +511,14 @@ router.post('/services/:serviceId/variables', (req, res, next) => {
     });
 
     const rows = queryAll('SELECT * FROM variables WHERE scope_type = ? AND scope_id = ? ORDER BY key ASC', 'service', service.id);
+    createStagedChange({
+      environmentId: service.environment_id,
+      serviceId: service.id,
+      serviceName: service.name,
+      type: 'variable',
+      summary: `Added/updated ${variables.length} variable${variables.length !== 1 ? 's' : ''}`,
+      payload: { action: 'upsert', keys: variables.map(v => v.key) }
+    });
     return res.json({ data: rows.map(mapVariable) });
   } catch (err) {
     next(err);
@@ -514,6 +542,14 @@ router.patch('/services/:serviceId/variables/:key', (req, res, next) => {
     execute('UPDATE variables SET value = ?, secret = ?, updated_at = ? WHERE id = ?', newVal, newSec, now, existing.id);
 
     const updated = queryOne('SELECT * FROM variables WHERE id = ?', existing.id);
+    createStagedChange({
+      environmentId: service.environment_id,
+      serviceId: service.id,
+      serviceName: service.name,
+      type: 'variable',
+      summary: `Updated variable ${key}`,
+      payload: { action: 'upsert', key }
+    });
     return res.json(mapVariable(updated));
   } catch (err) {
     next(err);
@@ -525,7 +561,150 @@ router.delete('/services/:serviceId/variables/:key', (req, res) => {
   const service = getService(req.params.serviceId);
   const key = req.params.key;
   execute('DELETE FROM variables WHERE scope_type = ? AND scope_id = ? AND key = ?', 'service', service.id, key);
+  createStagedChange({
+    environmentId: service.environment_id,
+    serviceId: service.id,
+    serviceName: service.name,
+    type: 'variable',
+    summary: `Deleted variable ${key}`,
+    payload: { action: 'delete', key }
+  });
   return res.status(204).end();
+});
+
+// GET /services/:serviceId/variables/suggestions
+router.get('/services/:serviceId/variables/suggestions', async (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+
+    // Need source repo to fetch .env.example
+    if (!service.source_repo) {
+      return res.json({ data: [] });
+    }
+
+    const cleanRepo = service.source_repo.replace(/\.git$/, '');
+    const branch = service.source_branch || 'main';
+
+    // Try to get a token for this repo
+    const { getRepoInstallationToken } = await import('../services/github-app.js');
+    const { GITHUB_TOKEN } = await import('../config.js');
+    const [owner, repoName] = cleanRepo.includes('/') ? cleanRepo.split('/') : [null, cleanRepo];
+    let token = GITHUB_TOKEN;
+    if (owner && repoName) {
+      const instToken = await getRepoInstallationToken(owner, repoName);
+      if (instToken) token = instToken;
+    }
+
+    const headers = {
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'Morline-App',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+
+    // Try candidate filenames
+    const candidates = ['.env.example', '.env.sample', '.env.template', 'example.env', '.env.defaults'];
+    let envContent = null;
+    let foundSource = '.env.example';
+
+    for (const filename of candidates) {
+      const url = `https://api.github.com/repos/${cleanRepo}/contents/${filename}?ref=${branch}`;
+      try {
+        const r = await fetch(url, { headers });
+        if (r.ok) {
+          const data = await r.json();
+          if (data.content) {
+            envContent = Buffer.from(data.content, 'base64').toString('utf-8');
+            foundSource = filename;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    // Also check local repo clone workspace if exists
+    if (!envContent) {
+      const { APPS_DIR } = await import('../config.js');
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const localAppDir = path.join(APPS_DIR, service.id);
+      for (const filename of candidates) {
+        const localPath = path.join(localAppDir, filename);
+        if (fs.existsSync(localPath)) {
+          try {
+            envContent = fs.readFileSync(localPath, 'utf-8');
+            foundSource = filename;
+            break;
+          } catch (e) {}
+        }
+      }
+    }
+
+    if (!envContent) {
+      return res.json({ data: [] });
+    }
+
+    // Parse .env format
+    const suggestions = [];
+    const lines = envContent.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let value = trimmed.slice(eqIdx + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      if (!key) continue;
+      suggestions.push({
+        key,
+        value: value || null,
+        secret: /password|secret|key|token|api_key|private|auth/i.test(key),
+        source: foundSource
+      });
+    }
+
+    // Filter out keys already set
+    const existingKeys = new Set(
+      queryAll('SELECT key FROM variables WHERE scope_type = ? AND scope_id = ?', 'service', service.id).map(v => v.key)
+    );
+
+    // Filter out dismissed keys
+    const dismissedKeys = new Set(
+      queryAll('SELECT key FROM variable_suggestion_dismissals WHERE service_id = ?', service.id).map(d => d.key)
+    );
+
+    const filtered = suggestions.filter(s => !existingKeys.has(s.key) && !dismissedKeys.has(s.key));
+
+    return res.json({ data: filtered });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /services/:serviceId/variables/suggestions/dismiss
+router.post('/services/:serviceId/variables/suggestions/dismiss', (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+    const { keys } = req.body || {};
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return res.status(400).json({ code: 'validation_failed', message: 'keys array is required' });
+    }
+
+    const now = new Date().toISOString();
+    for (const key of keys) {
+      execute(`
+        INSERT INTO variable_suggestion_dismissals (service_id, key, dismissed_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(service_id, key) DO UPDATE SET dismissed_at = excluded.dismissed_at
+      `, service.id, key, now);
+    }
+
+    return res.json({ dismissed: keys.length });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /services/:serviceId/variables/references

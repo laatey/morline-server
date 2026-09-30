@@ -87,6 +87,30 @@ function applyMigrations(db) {
       PRIMARY KEY (token)
     );
   `);
+
+  // 5. staged_changes table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS staged_changes (
+      id TEXT PRIMARY KEY,
+      environment_id TEXT NOT NULL,
+      service_id TEXT,
+      service_name TEXT,
+      type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  // 6. variable_suggestion_dismissals table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS variable_suggestion_dismissals (
+      service_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      dismissed_at TEXT NOT NULL,
+      PRIMARY KEY (service_id, key)
+    );
+  `);
 }
 
 export function queryOne(sql, ...params) {

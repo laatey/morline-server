@@ -8,6 +8,7 @@ import { eventBus } from '../engine/event-bus.js';
 import { logManager } from '../engine/log-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { buildManager } from '../engine/build-manager.js';
+import stagedChangesRouter from './staged-changes.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -512,5 +513,8 @@ router.get('/:environmentId/metrics', (req, res) => {
   const result = metricsCollector.getEnvironmentMetrics(env.id, range, serviceId, metricNames);
   return res.json(result);
 });
+
+// Nested staged-changes routes
+router.use('/:envId/staged-changes', stagedChangesRouter);
 
 export default router;
