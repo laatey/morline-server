@@ -97,6 +97,16 @@ const server = app.listen(PORT, HOST, async () => {
   console.log(`📡 OpenAPI Base URL: ${PUBLIC_URL}/v1`);
   console.log(`======================================================\n`);
 
+  // If running on a dynamic platform port (like Railway), also listen on 3001 for tunnel compatibility
+  if (PORT !== 3001) {
+    try {
+      const fallbackServer = app.listen(3001, '0.0.0.0', () => {
+        console.log(`🔗 Also listening on internal fallback port http://0.0.0.0:3001`);
+      });
+      fallbackServer.on('error', () => {});
+    } catch (e) {}
+  }
+
   // Start Cloudflare Tunnel if token is configured
   try {
     await tunnelManager.start();
