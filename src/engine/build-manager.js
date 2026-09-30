@@ -284,26 +284,99 @@ server.listen(port, () => {
     }
 
     // 4. Resolve Start Command
+    // Use stored command only if it was explicitly set by the user (not the default placeholder).
+    // After a build we re-inspect the workspace so TypeScript/compiled projects work correctly.
+    const GENERIC_DEFAULTS = ['node server.js', 'node index.js', 'node app.js', 'npm start'];
     let startCommand = (settings.start_command || '').trim();
-    if (!startCommand) {
+    const isDefaultPlaceholder = !startCommand || GENERIC_DEFAULTS.includes(startCommand);
+
+    if (isDefaultPlaceholder) {
+      // Re-read package.json after the build so we see post-compile scripts
       const pkgPath = path.join(cwd, 'package.json');
+      let pkg = null;
       if (fs.existsSync(pkgPath)) {
-        try {
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-          if (pkg.scripts?.start) {
-            startCommand = 'npm start';
-          } else if (pkg.main && fs.existsSync(path.join(cwd, pkg.main))) {
-            startCommand = `node ${pkg.main}`;
+        try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')); } catch (e) {}
+      }
+
+      // 4a. Prefer package.json scripts.start (covers "node dist/index.js", etc.)
+      if (pkg?.scripts?.start) {
+        startCommand = 'npm start';
+      }
+
+      // 4b. For TypeScript projects: check tsconfig outDir to find compiled entry point
+      if (!startCommand || startCommand === 'npm start') {
+        const tsconfigPath = path.join(cwd, 'tsconfig.json');
+        if (fs.existsSync(tsconfigPath)) {
+          try {
+            const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, 'utf-8'));
+            const outDir = tsconfig?.compilerOptions?.outDir || 'dist';
+            const outDirAbs = path.join(cwd, outDir);
+            // Look for common compiled entry points
+            const candidates = ['index.js', 'server.js', 'app.js', 'main.js'];
+            for (const c of candidates) {
+              if (fs.existsSync(path.join(outDirAbs, c))) {
+                // If package.json scripts.start exists, trust it — otherwise point directly
+                if (!pkg?.scripts?.start) {
+                  startCommand = `node ${outDir}/${c}`;
+                }
+                break;
+              }
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 4c. Check common compiled output dirs (dist/, build/, out/) regardless of tsconfig
+      if (!startCommand || GENERIC_DEFAULTS.includes(startCommand)) {
+        const compiledDirs = ['dist', 'build', 'out', 'lib'];
+        const entryNames = ['index.js', 'server.js', 'app.js', 'main.js'];
+        outer: for (const dir of compiledDirs) {
+          for (const entry of entryNames) {
+            const p = path.join(cwd, dir, entry);
+            if (fs.existsSync(p)) {
+              startCommand = pkg?.scripts?.start ? 'npm start' : `node ${dir}/${entry}`;
+              break outer;
+            }
           }
-        } catch (e) {}
+        }
       }
-      if (!startCommand) {
-        if (fs.existsSync(path.join(cwd, 'server.js'))) startCommand = 'node server.js';
-        else if (fs.existsSync(path.join(cwd, 'index.js'))) startCommand = 'node index.js';
-        else if (fs.existsSync(path.join(cwd, 'app.js'))) startCommand = 'node app.js';
-        else if (fs.existsSync(path.join(cwd, 'main.py'))) startCommand = 'python main.py';
-        else startCommand = 'node server.js';
+
+      // 4d. Fall back to pkg.main if it exists on disk
+      if (!startCommand || GENERIC_DEFAULTS.includes(startCommand)) {
+        if (pkg?.main && fs.existsSync(path.join(cwd, pkg.main))) {
+          startCommand = `node ${pkg.main}`;
+        }
       }
+
+      // 4e. Plain JS roots (only if actually present)
+      if (!startCommand || GENERIC_DEFAULTS.includes(startCommand)) {
+        const jsRoots = ['index.js', 'server.js', 'app.js', 'main.js'];
+        for (const f of jsRoots) {
+          if (fs.existsSync(path.join(cwd, f))) {
+            startCommand = `node ${f}`;
+            break;
+          }
+        }
+      }
+
+      // 4f. Python
+      if (!startCommand || GENERIC_DEFAULTS.includes(startCommand)) {
+        if (fs.existsSync(path.join(cwd, 'main.py'))) startCommand = 'python main.py';
+        else if (fs.existsSync(path.join(cwd, 'app.py'))) startCommand = 'uvicorn app:app --host 0.0.0.0 --port $PORT';
+      }
+
+      // 4g. Last resort — log clearly that we couldn't detect it
+      if (!startCommand || GENERIC_DEFAULTS.includes(startCommand)) {
+        startCommand = pkg?.scripts?.start ? 'npm start' : 'node server.js';
+        logManager.appendLog({
+          deploymentId, serviceId, serviceName: service.name, environmentId: service.environment_id,
+          level: 'warn',
+          message: `[Deploy] Could not auto-detect start command — using "${startCommand}". Set a custom start command in service settings if this fails.`
+        });
+      }
+
+      // Persist the resolved command so next redeploy reuses it
+      execute('UPDATE service_settings SET start_command = ? WHERE service_id = ?', startCommand, serviceId);
     }
 
     // 5. Deploying Phase
