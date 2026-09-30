@@ -26,17 +26,17 @@ async function req(path, options = {}) {
 }
 
 async function runTests() {
-  console.log('🧪 Starting End-to-End Test Suite for Moorline Backend Server...\n');
+  console.log('🧪 Starting End-to-End Test Suite for Morline Backend Server...\n');
 
   // 1. Auth Signup
   console.log('1. Testing User Registration...');
-  const userEmail = `dev_${Date.now()}@moorline.dev`;
+  const userEmail = `dev_${Date.now()}@morline.dev`;
   const signupRes = await req('/auth/signup', {
     method: 'POST',
     body: JSON.stringify({
       email: userEmail,
       password: 'SuperSecretPassword123!',
-      name: 'Moorline Developer'
+      name: 'Morline Developer'
     })
   });
   assert.strictEqual(signupRes.status, 201, `Signup failed: ${JSON.stringify(signupRes.data)}`);
@@ -267,7 +267,7 @@ async function runTests() {
   console.log(`   ✅ Service wake signal sent (status: ${wakeRes.data.status})`);
 
   console.log('\n🎉 ALL 15 VERIFICATION STAGES PASSED SUCCESSFULLY!');
-  console.log('Moorline Backend Server is fully operational and strictly compliant with openapi.yaml.\n');
+  console.log('Morline Backend Server is fully operational and strictly compliant with openapi.yaml.\n');
 }
 
 runTests().catch(err => {

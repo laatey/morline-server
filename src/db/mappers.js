@@ -189,7 +189,7 @@ export function mapServiceDetail(service, settings, topology) {
       replicas: 1
     },
     topology: topology || {
-      privateEndpoint: `${service.name}.moorline.internal:${service.port || 3000}`,
+      privateEndpoint: `${service.name}.morline.internal:${service.port || 3000}`,
       publicEndpoints: service.primaryDomain ? [`https://${service.primaryDomain}`] : [],
       dependencies: [],
       consumers: []

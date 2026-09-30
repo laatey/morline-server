@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Moorline API Backend Server — Open-source Railway-style platform backend",
+  "description": "Morline API Backend Server — Open-source Railway-style platform backend",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

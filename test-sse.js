@@ -10,7 +10,7 @@ async function testSSE() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      email: `sse_${Date.now()}@moorline.dev`,
+      email: `sse_${Date.now()}@morline.dev`,
       password: 'SuperSecretPassword123!',
       name: 'SSE Tester'
     })

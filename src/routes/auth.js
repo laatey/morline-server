@@ -138,7 +138,7 @@ router.post('/login', async (req, res, next) => {
 router.get('/oauth/:provider/start', (req, res) => {
   const provider = req.params.provider;
   const redirectUri = `${req.protocol}://${req.get('host')}/v1/auth/oauth/${provider}/callback`;
-  const mockOAuthUrl = `https://github.com/login/oauth/authorize?client_id=moorline_app&redirect_uri=${encodeURIComponent(redirectUri)}`;
+  const mockOAuthUrl = `https://github.com/login/oauth/authorize?client_id=morline_app&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
   if (req.headers.accept && req.headers.accept.includes('application/json')) {
     return res.json({ url: mockOAuthUrl });
@@ -154,7 +154,7 @@ router.get('/oauth/:provider/callback', (req, res) => {
     const now = new Date().toISOString();
     execute(`
       INSERT INTO users (id, email, email_verified, name, username, password_hash, created_at, updated_at)
-      VALUES (?, 'oauth@moorline.dev', 1, 'OAuth User', 'oauth-user', 'oauth_placeholder', ?, ?)
+      VALUES (?, 'oauth@morline.dev', 1, 'OAuth User', 'oauth-user', 'oauth_placeholder', ?, ?)
     `, userId, now, now);
     user = queryOne('SELECT * FROM users WHERE id = ?', userId);
   }

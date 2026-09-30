@@ -21,7 +21,7 @@ class BuildManager {
     const serverJsPath = path.join(dir, 'server.js');
 
     if (!fs.existsSync(serverJsPath)) {
-      const templateCode = `// Moorline Service: ${serviceName}
+      const templateCode = `// Morline Service: ${serviceName}
 import http from 'node:http';
 
 const port = process.env.PORT || 3000;
@@ -42,7 +42,7 @@ const server = http.createServer((req, res) => {
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
-    message: 'Hello from Moorline!',
+    message: 'Hello from Morline!',
     service: serviceName,
     path: req.url,
     method: req.method,

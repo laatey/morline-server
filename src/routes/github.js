@@ -29,7 +29,7 @@ router.get('/callback', async (req, res, next) => {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        'User-Agent': 'Moorline-Server'
+        'User-Agent': 'Morline-Server'
       },
       body: JSON.stringify({
         client_id: GITHUB_CLIENT_ID,
@@ -49,7 +49,7 @@ router.get('/callback', async (req, res, next) => {
     const userRes = await fetch('https://api.github.com/user', {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'User-Agent': 'Moorline-Server',
+        'User-Agent': 'Morline-Server',
         'Accept': 'application/vnd.github+json'
       }
     });
@@ -138,7 +138,7 @@ router.get('/repos', async (req, res, next) => {
     const ghRes = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
       headers: {
         'Authorization': `Bearer ${token}`,
-        'User-Agent': 'Moorline-Server',
+        'User-Agent': 'Morline-Server',
         'Accept': 'application/vnd.github+json'
       }
     });
@@ -182,7 +182,7 @@ router.get('/repos/:owner/:repo/branches', async (req, res, next) => {
     const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches`, {
       headers: {
         'Authorization': `Bearer ${token}`,
-        'User-Agent': 'Moorline-Server',
+        'User-Agent': 'Morline-Server',
         'Accept': 'application/vnd.github+json'
       }
     });
@@ -223,7 +223,7 @@ router.get('/repos/:owner/:repo/detect', async (req, res) => {
       const contentRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents`, {
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'Moorline-Server',
+          'User-Agent': 'Morline-Server',
           'Accept': 'application/vnd.github+json'
         }
       });

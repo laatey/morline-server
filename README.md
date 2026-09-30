@@ -1,4 +1,4 @@
-# Moorline API Backend Server
+# Morline API Backend Server
 
 A production-ready, open-source Railway-style application deployment platform backend server built in Node.js.
 
@@ -37,9 +37,9 @@ The backend strictly conforms to [`openapi/openapi.yaml`](./openapi/openapi.yaml
 morline-server/
 ├── data/                    # Persistent storage (DB, apps, avatars)
 │   ├── apps/                # Isolated application workspaces
-│   └── moorline.db          # SQLite WAL database
+│   └── morline.db           # SQLite WAL database
 ├── openapi/
-│   └── openapi.yaml         # Moorline OpenAPI 3.0 specification contract
+│   └── openapi.yaml         # Morline OpenAPI 3.0 specification contract
 ├── src/
 │   ├── config.js            # Ports, JWT secret, storage paths
 │   ├── index.js             # Main server entry point & router assembly

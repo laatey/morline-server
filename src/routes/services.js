@@ -50,7 +50,7 @@ function getServiceDetail(service) {
   });
 
   const topology = {
-    privateEndpoint: `${service.name}.moorline.internal:${networking?.target_port || service.port || 3000}`,
+    privateEndpoint: `${service.name}.morline.internal:${networking?.target_port || service.port || 3000}`,
     publicEndpoints: domains.map(d => `https://${d.host}`),
     dependencies: deps.map(d => ({ id: d.id, name: d.name, logo: d.logo, status: d.status, via: d.via })),
     consumers: consumers.map(c => ({ id: c.id, name: c.name, logo: c.logo, status: c.status, via: c.via }))
@@ -343,7 +343,7 @@ router.get('/services/:serviceId/networking', (req, res) => {
     public: net ? Boolean(net.public) : true,
     targetPort: net?.target_port || service.port || 3000,
     domains: domainRows.map(mapDomain),
-    privateHostname: `${service.name}.moorline.internal`,
+    privateHostname: `${service.name}.morline.internal`,
     privatePort: net?.private_port || service.port || 3000
   });
 });
@@ -377,7 +377,7 @@ router.patch('/services/:serviceId/networking', (req, res) => {
     public: net ? Boolean(net.public) : true,
     targetPort: net?.target_port || 3000,
     domains: domainRows.map(mapDomain),
-    privateHostname: `${service.name}.moorline.internal`,
+    privateHostname: `${service.name}.morline.internal`,
     privatePort: net?.private_port || 3000
   });
 });
@@ -541,7 +541,7 @@ router.get('/services/:serviceId/variables/references', (req, res) => {
       serviceId: s.id,
       serviceName: s.name,
       variableName: `${s.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`,
-      previewValue: `http://${s.name}.moorline.internal:3000`
+      previewValue: `http://${s.name}.morline.internal:3000`
     });
   }
 

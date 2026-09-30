@@ -15,7 +15,7 @@ export const DEFAULT_TEMPLATES = [
     group: 'Databases',
     hint: 'Relational database with persistent volume',
     inputs: [
-      { key: 'POSTGRES_DB', label: 'Database Name', type: 'string', required: true, default: 'moorline' },
+      { key: 'POSTGRES_DB', label: 'Database Name', type: 'string', required: true, default: 'morline' },
       { key: 'POSTGRES_USER', label: 'User', type: 'string', required: true, default: 'postgres' },
       { key: 'POSTGRES_PASSWORD', label: 'Password', type: 'secret', required: true, default: 'postgres' }
     ]
@@ -39,9 +39,9 @@ export const DEFAULT_TEMPLATES = [
     group: 'Databases',
     hint: 'Open-source relational database',
     inputs: [
-      { key: 'MYSQL_DATABASE', label: 'Database Name', type: 'string', required: true, default: 'moorline' },
-      { key: 'MYSQL_USER', label: 'User', type: 'string', required: true, default: 'moorline' },
-      { key: 'MYSQL_PASSWORD', label: 'Password', type: 'secret', required: true, default: 'moorline' }
+      { key: 'MYSQL_DATABASE', label: 'Database Name', type: 'string', required: true, default: 'morline' },
+      { key: 'MYSQL_USER', label: 'User', type: 'string', required: true, default: 'morline' },
+      { key: 'MYSQL_PASSWORD', label: 'Password', type: 'secret', required: true, default: 'morline' }
     ]
   },
   {
@@ -52,7 +52,7 @@ export const DEFAULT_TEMPLATES = [
     group: 'Databases',
     hint: 'Document database for modern apps',
     inputs: [
-      { key: 'MONGO_INITDB_DATABASE', label: 'Database Name', type: 'string', required: true, default: 'moorline' }
+      { key: 'MONGO_INITDB_DATABASE', label: 'Database Name', type: 'string', required: true, default: 'morline' }
     ]
   },
   {

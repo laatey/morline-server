@@ -55,7 +55,7 @@ app.use('/avatars', express.static(path.join(DATA_DIR, 'avatars')));
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    name: 'Moorline API Server',
+    name: 'Morline API Server',
     version: '1.0.0',
     documentation: '/v1'
   });
@@ -93,7 +93,7 @@ app.use(errorHandler);
 // Start server
 const server = app.listen(PORT, HOST, async () => {
   console.log(`\n======================================================`);
-  console.log(`🚀 Moorline API Backend Server running on http://${HOST}:${PORT}`);
+  console.log(`🚀 Morline API Backend Server running on http://${HOST}:${PORT}`);
   console.log(`📡 OpenAPI Base URL: ${PUBLIC_URL}/v1`);
   console.log(`======================================================\n`);
 

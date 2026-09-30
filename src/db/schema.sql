@@ -1,4 +1,4 @@
--- Moorline Database Schema for SQLite
+-- Morline Database Schema for SQLite
 
 PRAGMA foreign_keys = ON;
 

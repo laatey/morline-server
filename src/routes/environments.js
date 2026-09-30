@@ -360,7 +360,7 @@ router.post('/:environmentId/connections', (req, res, next) => {
 
       if (injectVariables) {
         const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
-        const val = `http://${toSrv.name}.moorline.internal:${effectivePort}`;
+        const val = `http://${toSrv.name}.morline.internal:${effectivePort}`;
         const varId = `var_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
         execute(`

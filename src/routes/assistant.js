@@ -227,7 +227,7 @@ async function generateAIResponse(thread, userContent, contextItems) {
     }
   }
 
-  const systemPrompt = `You are Moorline AI Assistant, an expert DevOps and cloud infrastructure assistant built directly into the Moorline platform.
+  const systemPrompt = `You are Morline AI Assistant, an expert DevOps and cloud infrastructure assistant built directly into the Morline platform.
 Help the developer deploy, debug, and configure their cloud services, databases, environment variables, and domains.
 
 Current Live Platform Context:
@@ -339,7 +339,7 @@ Instructions:
       `*Note: To enable full AI reasoning, code generation, and interactive chat, please configure \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your server environment variables.*`;
   }
 
-  return `Moorline AI Assistant is ready. To enable live LLM intelligence, please set \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your environment variables. All your services are currently running.`;
+  return `Morline AI Assistant is ready. To enable live LLM intelligence, please set \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your environment variables. All your services are currently running.`;
 }
 
 // POST /assistant/threads/:threadId/messages

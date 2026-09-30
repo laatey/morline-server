@@ -1,4 +1,4 @@
-# Railway Nixpacks Configuration for Moorline Backend
+# Railway Nixpacks Configuration for Morline Backend
 [phases.setup]
 nixPkgs = ["nodejs_20", "cloudflared", "git"]
 
