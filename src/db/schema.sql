@@ -28,11 +28,18 @@ CREATE TABLE IF NOT EXISTS user_settings (
 -- User Onboarding
 CREATE TABLE IF NOT EXISTS onboarding_state (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  step INTEGER NOT NULL DEFAULT 0,
+  completed INTEGER NOT NULL DEFAULT 0,
+  workspace_name TEXT,
+  selected_template TEXT,
+  invited_emails TEXT,
+  data TEXT NOT NULL DEFAULT '{}',
   team_created INTEGER NOT NULL DEFAULT 0,
   github_connected INTEGER NOT NULL DEFAULT 0,
   first_project_created INTEGER NOT NULL DEFAULT 0,
   first_deploy_succeeded INTEGER NOT NULL DEFAULT 0,
-  dismissed INTEGER NOT NULL DEFAULT 0
+  dismissed INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
 );
 
 -- Sessions
@@ -310,8 +317,8 @@ CREATE TABLE IF NOT EXISTS activity (
 -- Assistant Threads
 CREATE TABLE IF NOT EXISTS assistant_threads (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  environment_id TEXT REFERENCES environments(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT 'New Conversation',
   archived INTEGER NOT NULL DEFAULT 0,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,

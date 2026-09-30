@@ -204,30 +204,68 @@ router.patch('/settings', (req, res) => {
   return res.json(mapUserSettings(row));
 });
 
-// PATCH /me/onboarding
-router.patch('/onboarding', (req, res) => {
+// GET /me/onboarding
+router.get('/onboarding', (req, res) => {
+  const row = queryOne('SELECT * FROM onboarding_state WHERE user_id = ?', req.user.id);
+  return res.json(mapOnboardingState(row));
+});
+
+function handleOnboardingUpdate(req, res) {
   const current = queryOne('SELECT * FROM onboarding_state WHERE user_id = ?', req.user.id) || {};
   const b = req.body || {};
+
+  const step = b.step !== undefined ? parseInt(b.step, 10) : (b.currentStep !== undefined ? parseInt(b.currentStep, 10) : (current.step ?? 0));
+  const completed = b.completed !== undefined ? (b.completed ? 1 : 0) : (current.completed ?? 0);
+  const workspaceName = b.workspaceName !== undefined ? b.workspaceName : (b.workspace !== undefined ? b.workspace : (current.workspace_name || null));
+  const selectedTemplate = b.selectedTemplate !== undefined ? b.selectedTemplate : (b.template !== undefined ? b.template : (current.selected_template || null));
+  const invitedEmails = b.invitedEmails !== undefined 
+    ? (Array.isArray(b.invitedEmails) ? b.invitedEmails.join(', ') : b.invitedEmails)
+    : (b.invites !== undefined ? (Array.isArray(b.invites) ? b.invites.join(', ') : b.invites) : (current.invited_emails || null));
+
+  let currentData = {};
+  try {
+    currentData = typeof current.data === 'string' ? JSON.parse(current.data) : (current.data || {});
+  } catch {
+    currentData = {};
+  }
+  const mergedData = b.data ? { ...currentData, ...b.data } : currentData;
 
   const teamCreated = b.teamCreated !== undefined ? (b.teamCreated ? 1 : 0) : (current.team_created || 0);
   const githubConnected = b.githubConnected !== undefined ? (b.githubConnected ? 1 : 0) : (current.github_connected || 0);
   const firstProjectCreated = b.firstProjectCreated !== undefined ? (b.firstProjectCreated ? 1 : 0) : (current.first_project_created || 0);
   const firstDeploySucceeded = b.firstDeploySucceeded !== undefined ? (b.firstDeploySucceeded ? 1 : 0) : (current.first_deploy_succeeded || 0);
   const dismissed = b.dismissed !== undefined ? (b.dismissed ? 1 : 0) : (current.dismissed || 0);
+  const now = new Date().toISOString();
 
   execute(`
-    INSERT INTO onboarding_state (user_id, team_created, github_connected, first_project_created, first_deploy_succeeded, dismissed)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO onboarding_state (
+      user_id, step, completed, workspace_name, selected_template, invited_emails, data,
+      team_created, github_connected, first_project_created, first_deploy_succeeded, dismissed, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
+      step = excluded.step,
+      completed = excluded.completed,
+      workspace_name = excluded.workspace_name,
+      selected_template = excluded.selected_template,
+      invited_emails = excluded.invited_emails,
+      data = excluded.data,
       team_created = excluded.team_created,
       github_connected = excluded.github_connected,
       first_project_created = excluded.first_project_created,
       first_deploy_succeeded = excluded.first_deploy_succeeded,
-      dismissed = excluded.dismissed
-  `, req.user.id, teamCreated, githubConnected, firstProjectCreated, firstDeploySucceeded, dismissed);
+      dismissed = excluded.dismissed,
+      updated_at = excluded.updated_at
+  `, req.user.id, step, completed, workspaceName, selectedTemplate, invitedEmails, JSON.stringify(mergedData),
+     teamCreated, githubConnected, firstProjectCreated, firstDeploySucceeded, dismissed, now);
 
   const row = queryOne('SELECT * FROM onboarding_state WHERE user_id = ?', req.user.id);
   return res.json(mapOnboardingState(row));
-});
+}
+
+// PATCH /me/onboarding, PUT /me/onboarding, POST /me/onboarding
+router.patch('/onboarding', handleOnboardingUpdate);
+router.put('/onboarding', handleOnboardingUpdate);
+router.post('/onboarding', handleOnboardingUpdate);
 
 export default router;

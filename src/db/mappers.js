@@ -41,21 +41,45 @@ export function mapUserSettings(row) {
 }
 
 export function mapOnboardingState(row) {
+  let customData = {};
+  if (row?.data) {
+    try {
+      customData = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+    } catch {
+      customData = {};
+    }
+  }
+
   if (!row) {
     return {
+      step: 0,
+      completed: false,
+      workspaceName: null,
+      selectedTemplate: null,
+      invitedEmails: null,
+      data: {},
       teamCreated: false,
       githubConnected: false,
       firstProjectCreated: false,
       firstDeploySucceeded: false,
-      dismissed: false
+      dismissed: false,
+      updatedAt: null
     };
   }
+
   return {
+    step: row.step ?? 0,
+    completed: Boolean(row.completed),
+    workspaceName: row.workspace_name || null,
+    selectedTemplate: row.selected_template || null,
+    invitedEmails: row.invited_emails || null,
+    data: customData,
     teamCreated: Boolean(row.team_created),
     githubConnected: Boolean(row.github_connected),
     firstProjectCreated: Boolean(row.first_project_created),
     firstDeploySucceeded: Boolean(row.first_deploy_succeeded),
-    dismissed: Boolean(row.dismissed)
+    dismissed: Boolean(row.dismissed),
+    updatedAt: row.updated_at || null
   };
 }
 
@@ -366,13 +390,27 @@ export function mapActivity(row) {
 
 export function mapThread(row, createdBy = null, counts = {}) {
   if (!row) return null;
+  const lastTime = row.last_activity_at || row.created_at;
+  let when = 'now';
+  if (lastTime) {
+    const diffMs = Date.now() - new Date(lastTime).getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays > 0) when = `${diffDays}d`;
+    else if (diffHours > 0) when = `${diffHours}h`;
+    else if (diffMins > 0) when = `${diffMins}m`;
+    else when = 'now';
+  }
+
   return {
     id: row.id,
-    projectId: row.project_id,
-    environmentId: row.environment_id,
+    projectId: row.project_id || null,
+    environmentId: row.environment_id || null,
     environmentName: row.environment_name || 'production',
     title: row.title,
     archived: Boolean(row.archived),
+    when,
     messageCount: Number(counts.messageCount || 0),
     lastMessagePreview: counts.lastMessagePreview || null,
     pendingActionCount: Number(counts.pendingActionCount || 0),
@@ -409,6 +447,7 @@ export function mapMessage(row) {
     role: row.role,
     status: row.status || 'done',
     content: row.content,
+    text: row.content,
     context,
     toolCalls,
     citations,

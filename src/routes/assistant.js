@@ -59,40 +59,70 @@ router.get('/projects/:projectId/assistant/suggestions', (req, res) => {
   return res.json({ data: suggestions });
 });
 
-// GET /projects/:projectId/assistant/threads
-router.get('/projects/:projectId/assistant/threads', (req, res) => {
-  const { projectId } = req.params;
+// Helper to get threads for a query
+function queryThreads(whereClause, params) {
   const rows = queryAll(`
     SELECT t.*, e.name as environment_name
     FROM assistant_threads t
     LEFT JOIN environments e ON e.id = t.environment_id
-    WHERE t.project_id = ?
+    WHERE ${whereClause}
     ORDER BY t.last_activity_at DESC
-  `, projectId);
+  `, ...params);
 
-  const data = rows.map(r => {
+  return rows.map(r => {
     const user = r.created_by ? queryOne('SELECT * FROM users WHERE id = ?', r.created_by) : null;
     const counts = getThreadCounts(r.id);
-    return mapThread(r, mapUserRef(user), counts);
+    const mapped = mapThread(r, mapUserRef(user), counts);
+    // Include messages array for frontend direct consumption
+    const msgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', r.id);
+    mapped.messages = msgs.map(mapMessage);
+    return mapped;
   });
+}
 
+// GET /assistant/threads (Global, user-scoped, or project/environment scoped)
+router.get('/assistant/threads', (req, res) => {
+  const { projectId, environmentId } = req.query;
+  const conditions = ['(t.created_by = ? OR t.created_by IS NULL)'];
+  const params = [req.user.id];
+
+  if (projectId) {
+    conditions.push('t.project_id = ?');
+    params.push(projectId);
+  }
+  if (environmentId) {
+    conditions.push('t.environment_id = ?');
+    params.push(environmentId);
+  }
+
+  const data = queryThreads(conditions.join(' AND '), params);
   return res.json({ data });
 });
 
-// POST /projects/:projectId/assistant/threads
-router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
+// POST /assistant/threads (Direct creation with optional projectId / environmentId)
+router.post('/assistant/threads', (req, res, next) => {
   try {
-    const { projectId } = req.params;
-    const { environmentId, title = 'New Conversation' } = req.body || {};
-
-    if (!environmentId) throw validationError('environmentId is required');
-
-    const threadId = `thd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    let { id, projectId, environmentId, title = 'New Conversation' } = req.body || {};
+    const threadId = id || `thd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
+
+    // Auto-resolve project/environment if not provided
+    if (!projectId) {
+      const defaultProj = queryOne(`
+        SELECT p.id, e.id as env_id 
+        FROM projects p 
+        LEFT JOIN environments e ON e.project_id = p.id 
+        WHERE p.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?)
+        ORDER BY p.created_at ASC LIMIT 1
+      `, req.user.id);
+      projectId = defaultProj?.id || null;
+      if (!environmentId) environmentId = defaultProj?.env_id || null;
+    }
 
     execute(`
       INSERT INTO assistant_threads (id, project_id, environment_id, title, archived, created_by, created_at, last_activity_at)
       VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET title = excluded.title, last_activity_at = excluded.last_activity_at
     `, threadId, projectId, environmentId, title, req.user.id, now, now);
 
     const row = queryOne(`
@@ -102,7 +132,51 @@ router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
       WHERE t.id = ?
     `, threadId);
 
-    return res.status(201).json(mapThread(row, mapUserRef(req.user), { messageCount: 0, lastMessagePreview: null, pendingActionCount: 0 }));
+    const mapped = mapThread(row, mapUserRef(req.user), { messageCount: 0, lastMessagePreview: null, pendingActionCount: 0 });
+    mapped.messages = [];
+    return res.status(201).json(mapped);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /projects/:projectId/assistant/threads
+router.get('/projects/:projectId/assistant/threads', (req, res) => {
+  const { projectId } = req.params;
+  const data = queryThreads('t.project_id = ?', [projectId]);
+  return res.json({ data });
+});
+
+// POST /projects/:projectId/assistant/threads
+router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    let { id, environmentId, title = 'New Conversation' } = req.body || {};
+
+    if (!environmentId) {
+      const envRow = queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', projectId);
+      environmentId = envRow?.id || null;
+    }
+
+    const threadId = id || `thd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const now = new Date().toISOString();
+
+    execute(`
+      INSERT INTO assistant_threads (id, project_id, environment_id, title, archived, created_by, created_at, last_activity_at)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET title = excluded.title, last_activity_at = excluded.last_activity_at
+    `, threadId, projectId, environmentId, title, req.user.id, now, now);
+
+    const row = queryOne(`
+      SELECT t.*, e.name as environment_name
+      FROM assistant_threads t
+      LEFT JOIN environments e ON e.id = t.environment_id
+      WHERE t.id = ?
+    `, threadId);
+
+    const mapped = mapThread(row, mapUserRef(req.user), { messageCount: 0, lastMessagePreview: null, pendingActionCount: 0 });
+    mapped.messages = [];
+    return res.status(201).json(mapped);
   } catch (err) {
     next(err);
   }
@@ -346,15 +420,33 @@ Instructions:
 router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
   try {
     const threadId = req.params.threadId;
-    const thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
-    if (!thread) throw notFound('Thread not found');
+    const now = new Date().toISOString();
+    let thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
 
-    const { content, context = [] } = req.body || {};
-    if (!content) throw validationError('content is required');
+    const userContent = req.body?.content || req.body?.text || req.body?.message;
+    if (!userContent) throw validationError('content or text is required');
 
+    // Auto-create thread if client provided a random ID
+    if (!thread) {
+      const defaultProj = queryOne(`
+        SELECT p.id, e.id as env_id 
+        FROM projects p 
+        LEFT JOIN environments e ON e.project_id = p.id 
+        WHERE p.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?)
+        ORDER BY p.created_at ASC LIMIT 1
+      `, req.user.id);
+
+      const title = userContent.slice(0, 40) || 'New Conversation';
+      execute(`
+        INSERT INTO assistant_threads (id, project_id, environment_id, title, archived, created_by, created_at, last_activity_at)
+        VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+      `, threadId, defaultProj?.id || null, defaultProj?.env_id || null, title, req.user.id, now, now);
+      thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
+    }
+
+    const { context = [] } = req.body || {};
     const userMsgId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const assistantMsgId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-    const now = new Date().toISOString();
 
     const userAuthor = JSON.stringify(mapUserRef(req.user));
     const userContext = JSON.stringify(context);
@@ -363,7 +455,7 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     execute(`
       INSERT INTO assistant_messages (id, thread_id, role, status, content, context, author, created_at)
       VALUES (?, ?, 'user', 'done', ?, ?, ?, ?)
-    `, userMsgId, threadId, content, userContext, userAuthor, now);
+    `, userMsgId, threadId, userContent, userContext, userAuthor, now);
 
     execute('UPDATE assistant_threads SET last_activity_at = ? WHERE id = ?', now, threadId);
 
@@ -371,7 +463,7 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     const userMessageMapped = mapMessage(userMsgRow);
 
     // Generate real AI response using live platform telemetry
-    const replyText = await generateAIResponse(thread, content, context);
+    const replyText = await generateAIResponse(thread, userContent, context);
 
     const assistantNow = new Date(Date.now() + 500).toISOString();
     execute(`
@@ -396,12 +488,16 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
       res.write(`data: ${JSON.stringify({ text: replyText })}\n\n`);
 
       res.write('event: done\n');
-      res.write(`data: ${JSON.stringify({ message: assistantMessageMapped })}\n\n`);
+      res.write(`data: ${JSON.stringify({ message: assistantMessageMapped, text: replyText })}\n\n`);
       return res.end();
     }
 
     return res.status(202).json({
       userMessage: userMessageMapped,
+      assistantMessage: assistantMessageMapped,
+      reply: replyText,
+      text: replyText,
+      role: 'agent',
       assistantMessageId: assistantMsgId
     });
   } catch (err) {
