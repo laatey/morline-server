@@ -105,6 +105,40 @@ router.delete('/', (req, res, next) => {
           const prev = payload.previous;
           execute('UPDATE services SET source_repo = ?, source_branch = ?, updated_at = ? WHERE id = ?',
             prev.repo || null, prev.branch || null, new Date().toISOString(), change.service_id);
+        } else if (change.type === 'connection.created') {
+          // Revert created connection: remove connection and injected variable
+          const conn = payload.connectionId ? queryOne('SELECT * FROM connections WHERE id = ?', payload.connectionId)
+            : (payload.fromServiceId && payload.toServiceId) ? queryOne('SELECT * FROM connections WHERE from_service_id = ? AND to_service_id = ?', payload.fromServiceId, payload.toServiceId) : null;
+          if (conn) {
+            const toSrv = queryOne('SELECT name FROM services WHERE id = ?', conn.to_service_id);
+            if (toSrv) {
+              const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
+              execute('DELETE FROM variables WHERE scope_type = ? AND scope_id = ? AND key = ?', 'service', conn.from_service_id, key);
+            }
+            execute('DELETE FROM connections WHERE id = ?', conn.id);
+          }
+        } else if (change.type === 'connection.deleted' && payload.fromServiceId && payload.toServiceId) {
+          // Revert deleted connection: restore connection row and variable
+          const existing = queryOne('SELECT id FROM connections WHERE from_service_id = ? AND to_service_id = ?', payload.fromServiceId, payload.toServiceId);
+          if (!existing) {
+            const now = new Date().toISOString();
+            const connId = payload.connectionId || `con_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+            execute(`
+              INSERT INTO connections (id, environment_id, from_service_id, to_service_id, protocol, port, label, created_at)
+              VALUES (?, ?, ?, ?, 'http', 3000, 'http :3000', ?)
+            `, connId, envId, payload.fromServiceId, payload.toServiceId, now);
+
+            const toSrv = queryOne('SELECT name FROM services WHERE id = ?', payload.toServiceId);
+            if (toSrv) {
+              const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
+              const val = `http://${toSrv.name}.morline.internal:3000`;
+              execute(`
+                INSERT INTO variables (id, scope_type, scope_id, key, value, secret, is_reference, source, created_at, updated_at)
+                VALUES (?, 'service', ?, ?, ?, 0, 1, ?, ?, ?)
+                ON CONFLICT(scope_type, scope_id, key) DO UPDATE SET value = excluded.value
+              `, `var_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`, payload.fromServiceId, key, val, toSrv.name, now, now);
+            }
+          }
         }
       } catch (e) {
         console.error('[StagedUndo] Failed to revert change', change.id, e.message);

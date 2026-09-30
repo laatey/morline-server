@@ -9,7 +9,7 @@ import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { BASE_DOMAIN } from '../config.js';
-import { createStagedChange } from '../services/staged-changes-helper.js';
+import { createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
 const router = Router();
 router.use('/services', requireAuth);
@@ -486,6 +486,7 @@ router.put('/services/:serviceId/variables', (req, res, next) => {
       summary: `Updated ${variables.length} variable${variables.length !== 1 ? 's' : ''} (bulk replace)`,
       payload: { action: 'bulk_replace' }
     });
+    syncConnectionsWithVariables(service.environment_id, service.id);
     return res.json({ data: rows.map(mapVariable) });
   } catch (err) {
     next(err);
@@ -495,6 +496,7 @@ router.put('/services/:serviceId/variables', (req, res, next) => {
 // POST /services/:serviceId/variables (append / upsert)
 router.post('/services/:serviceId/variables', (req, res, next) => {
   try {
+    const service = getService(req.params.serviceId);
     let { variables } = req.body || {};
     if (!variables && req.body?.key) {
       variables = [{ key: req.body.key, value: req.body.value, secret: req.body.secret }];
@@ -512,6 +514,7 @@ router.post('/services/:serviceId/variables', (req, res, next) => {
       }
     });
 
+    syncConnectionsWithVariables(service.environment_id, service.id);
     const rows = queryAll('SELECT * FROM variables WHERE scope_type = ? AND scope_id = ? ORDER BY key ASC', 'service', service.id);
     createStagedChange({
       environmentId: service.environment_id,
@@ -543,6 +546,7 @@ router.patch('/services/:serviceId/variables/:key', (req, res, next) => {
 
     execute('UPDATE variables SET value = ?, secret = ?, updated_at = ? WHERE id = ?', newVal, newSec, now, existing.id);
 
+    syncConnectionsWithVariables(service.environment_id, service.id);
     const updated = queryOne('SELECT * FROM variables WHERE id = ?', existing.id);
     createStagedChange({
       environmentId: service.environment_id,
@@ -563,6 +567,7 @@ router.delete('/services/:serviceId/variables/:key', (req, res) => {
   const service = getService(req.params.serviceId);
   const key = req.params.key;
   execute('DELETE FROM variables WHERE scope_type = ? AND scope_id = ? AND key = ?', 'service', service.id, key);
+  syncConnectionsWithVariables(service.environment_id, service.id);
   createStagedChange({
     environmentId: service.environment_id,
     serviceId: service.id,
