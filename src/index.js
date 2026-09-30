@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
-import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
+import { PORT, HOST, DATA_DIR, PUBLIC_URL } from './config.js';
 import { initDb } from './db/index.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
@@ -48,8 +48,7 @@ app.use(requestIdMiddleware);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static assets & avatars
-app.use(express.static('public'));
+// Static avatars
 app.use('/avatars', express.static(path.join(DATA_DIR, 'avatars')));
 
 // Root & Healthcheck
@@ -64,6 +63,108 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', uptime: process.uptime() });
+});
+
+// GitHub App installation redirect handler
+// GitHub redirects to: https://api.morline.space/settings/integrations?installation_id=...&setup_action=install
+app.get('/settings/integrations', async (req, res) => {
+  const { installation_id, setup_action, error } = req.query;
+
+  if (error) {
+    return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Error</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0a;color:#f5f5f5;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}</style>
+</head><body><p style="color:#f87171;font-size:14px">GitHub connection failed: ${String(error).slice(0, 100)}</p></body></html>`);
+  }
+
+  // If GitHub sent an installation_id, auto-save it
+  if (installation_id) {
+    try {
+      const { execute, queryOne } = await import('./db/index.js');
+      const { generateGitHubAppJwt } = await import('./services/github-app.js');
+      const { GITHUB_APP_NAME } = await import('./config.js');
+
+      const instId = parseInt(installation_id, 10);
+      let account = 'GitHub Account';
+
+      const jwt = generateGitHubAppJwt();
+      if (jwt) {
+        const r = await fetch(`https://api.github.com/app/installations/${instId}`, {
+          headers: { 'Authorization': `Bearer ${jwt}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'Morline-App' }
+        });
+        if (r.ok) {
+          const data = await r.json();
+          account = data.account?.login || account;
+        }
+      }
+
+      const firstTeam = queryOne('SELECT id FROM teams ORDER BY created_at ASC LIMIT 1');
+      const teamId = firstTeam?.id || 'team_default';
+      const now = new Date().toISOString();
+
+      execute(`
+        INSERT INTO github_integration (team_id, account, install_url, installation_id, connected, connected_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT(team_id) DO UPDATE SET
+          account = excluded.account,
+          installation_id = excluded.installation_id,
+          connected = 1,
+          connected_at = excluded.connected_at
+      `, teamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, instId, now);
+
+      console.log(`[GitHub] Saved installation ${instId} (${account}) for team ${teamId}`);
+    } catch (e) {
+      console.error('[GitHub] Failed to save installation from redirect:', e.message);
+    }
+  }
+
+  // Serve minimal auto-close page
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GitHub Connected</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #f5f5f5;
+      font-family: system-ui, -apple-system, sans-serif;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      gap: 0;
+    }
+    .wrap { text-align: center; }
+    .dot {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: #22c55e;
+      display: inline-grid;
+      place-items: center;
+      margin-bottom: 12px;
+    }
+    .dot svg { width: 16px; height: 16px; stroke: #fff; fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+    p { font-size: 13px; color: #a3a3a3; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="dot">
+      <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <div style="font-size:14px;font-weight:500">GitHub connected</div>
+    <p>You can close this window.</p>
+  </div>
+  <script>
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'github_connected' }, '*');
+      }
+    } catch(e) {}
+    setTimeout(() => window.close(), 1500);
+  </script>
+</body>
+</html>`);
 });
 
 // Mount /v1 Router
@@ -87,23 +188,6 @@ v1.use('/', assistantRouter);
 v1.use('/integrations/github', githubRouter);
 
 app.use('/v1', v1);
-
-// Catch-all GET fallback: redirect web app routes to FRONTEND_URL
-app.use((req, res, next) => {
-  if (req.method === 'GET' && !req.path.startsWith('/v1') && !req.path.startsWith('/proxy') && !req.path.startsWith('/avatars') && req.path !== '/health' && req.path !== '/') {
-    return res.redirect(`${FRONTEND_URL}${req.originalUrl}`);
-  }
-  next();
-});
-
-// 404 handler for unmatched routes
-app.use((req, res) => {
-  res.status(404).json({
-    code: 'not_found',
-    message: `Cannot ${req.method} ${req.path}`,
-    requestId: req.id || 'req_unknown'
-  });
-});
 
 // Error Handler
 app.use(errorHandler);
