@@ -40,8 +40,17 @@ export const SERVICE_PORT_MAX = parseInt(process.env.SERVICE_PORT_MAX || '4999',
 
 export const LOG_RETENTION_LINES = 10000;
 
-// GitHub Integration (optional, enables real GitHub repo listing and cloning)
-export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
+// GitHub OAuth & App Configuration
+export const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || null;
+export const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || null;
 export const GITHUB_APP_NAME = process.env.GITHUB_APP_NAME || 'moorline';
+export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
+
+// AI Assistant LLM Provider Configuration
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
+export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+export const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || null;
 
 

@@ -5,6 +5,8 @@ import { mapThread, mapMessage, mapAction, mapUserRef } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound, conflict, validationError } from '../middleware/error-handler.js';
 import { eventBus } from '../engine/event-bus.js';
+import { logManager } from '../engine/log-manager.js';
+import { OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, GEMINI_API_KEY, ANTHROPIC_API_KEY } from '../config.js';
 
 const router = Router();
 router.use('/projects/:projectId/assistant', requireAuth);
@@ -198,6 +200,148 @@ router.get('/assistant/threads/:threadId/messages', (req, res) => {
   });
 });
 
+async function generateAIResponse(thread, userContent, contextItems) {
+  // 1. Gather live platform telemetry
+  const services = queryAll(`
+    SELECT s.id, s.name, s.kind, s.status, s.port, s.primary_domain, s.source_type, s.source_repo
+    FROM services s
+    JOIN environments e ON e.id = s.environment_id
+    WHERE e.project_id = ?
+  `, thread.project_id);
+
+  const crashedServices = services.filter(s => s.status === 'crashed');
+  const recentErrors = queryAll(`
+    SELECT d.service_name, d.error_summary, d.finished_at
+    FROM deployments d
+    JOIN services s ON s.id = d.service_id
+    JOIN environments e ON e.id = s.environment_id
+    WHERE e.project_id = ? AND d.state = 'failed'
+    ORDER BY d.created_at DESC LIMIT 3
+  `, thread.project_id);
+
+  let crashedLogs = '';
+  for (const s of crashedServices) {
+    const logs = logManager.getLogs({ serviceId: s.id, limit: 15 });
+    if (logs.length > 0) {
+      crashedLogs += `\nLogs for service ${s.name} (CRASHED):\n` + logs.map(l => `[${l.level}] ${l.message}`).join('\n');
+    }
+  }
+
+  const systemPrompt = `You are Moorline AI Assistant, an expert DevOps and cloud infrastructure assistant built directly into the Moorline platform.
+Help the developer deploy, debug, and configure their cloud services, databases, environment variables, and domains.
+
+Current Live Platform Context:
+- Project ID: ${thread.project_id}
+- Active Services: ${JSON.stringify(services.map(s => ({ name: s.name, kind: s.kind, status: s.status, domain: s.primary_domain })))}
+- Recent Deployment Failures: ${JSON.stringify(recentErrors)}
+${crashedLogs ? `\nRecent Crash Logs:\n${crashedLogs}` : ''}
+
+Instructions:
+- Provide direct, concise, and technically accurate recommendations.
+- If there are crashed services or build failures, explain the root cause and provide actionable fixes.
+- Format responses in clean markdown with bash/code snippets when helpful.`;
+
+  // 2. Fetch past conversation messages
+  const pastMsgs = queryAll(`
+    SELECT role, content FROM assistant_messages 
+    WHERE thread_id = ? ORDER BY created_at ASC LIMIT 10
+  `, thread.id);
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...pastMsgs.map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: userContent }
+  ];
+
+  // 3. Check Providers (OpenAI, Gemini, Anthropic)
+  if (OPENAI_API_KEY) {
+    try {
+      const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL || 'gpt-4o-mini',
+          messages,
+          temperature: 0.3,
+          max_tokens: 1000
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content;
+        if (text) return text;
+      }
+    } catch (err) {
+      console.error('[Assistant] OpenAI Call Failed:', err.message);
+    }
+  }
+
+  if (GEMINI_API_KEY) {
+    try {
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GEMINI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gemini-1.5-flash',
+          messages,
+          temperature: 0.3
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content;
+        if (text) return text;
+      }
+    } catch (err) {
+      console.error('[Assistant] Gemini Call Failed:', err.message);
+    }
+  }
+
+  if (ANTHROPIC_API_KEY) {
+    try {
+      const anthropicMsgs = messages.filter(m => m.role !== 'system');
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-3-5-sonnet-20241022',
+          system: systemPrompt,
+          messages: anthropicMsgs,
+          max_tokens: 1000
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.content?.[0]?.text;
+        if (text) return text;
+      }
+    } catch (err) {
+      console.error('[Assistant] Anthropic Call Failed:', err.message);
+    }
+  }
+
+  // Fallback when no LLM API key is configured
+  if (crashedServices.length > 0) {
+    const s = crashedServices[0];
+    const lastErr = recentErrors.find(e => e.service_name === s.name);
+    return `### ⚠️ Live Environment Diagnostic\n\nService **${s.name}** is currently **CRASHED**.\n\n` +
+      (lastErr ? `**Latest Error**: \`${lastErr.error_summary}\`\n\n` : '') +
+      `*Note: To enable full AI reasoning, code generation, and interactive chat, please configure \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your server environment variables.*`;
+  }
+
+  return `Moorline AI Assistant is ready. To enable live LLM intelligence, please set \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your environment variables. All your services are currently running.`;
+}
+
 // POST /assistant/threads/:threadId/messages
 router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
   try {
@@ -226,13 +370,8 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     const userMsgRow = queryOne('SELECT * FROM assistant_messages WHERE id = ?', userMsgId);
     const userMessageMapped = mapMessage(userMsgRow);
 
-    // Prepare assistant reply
-    let replyText = `I have analyzed your request: "${content}". Everything in your environment is running smoothly.`;
-    if (content.toLowerCase().includes('log') || content.toLowerCase().includes('error')) {
-      replyText = `I inspected the deployment logs. Services are running normally with no fatal exceptions detected.`;
-    } else if (content.toLowerCase().includes('deploy') || content.toLowerCase().includes('restart')) {
-      replyText = `I can help manage your services. You can trigger a deployment or restart anytime from the Services tab.`;
-    }
+    // Generate real AI response using live platform telemetry
+    const replyText = await generateAIResponse(thread, content, context);
 
     const assistantNow = new Date(Date.now() + 500).toISOString();
     execute(`

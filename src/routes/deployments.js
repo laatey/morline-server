@@ -7,6 +7,7 @@ import { notFound, conflict } from '../middleware/error-handler.js';
 import { logManager } from '../engine/log-manager.js';
 import { buildManager } from '../engine/build-manager.js';
 import { eventBus } from '../engine/event-bus.js';
+import { PUBLIC_URL } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,9 +22,15 @@ function getDeployment(deploymentId) {
 router.get('/:deploymentId', (req, res) => {
   const dep = getDeployment(req.params.deploymentId);
   const user = dep.created_by ? queryOne('SELECT id, name, username, avatar_url FROM users WHERE id = ?', dep.created_by) : null;
-  const srv = queryOne('SELECT name, port FROM services WHERE id = ?', dep.service_id);
+  const srv = queryOne('SELECT name, port, primary_domain FROM services WHERE id = ?', dep.service_id);
 
-  const url = srv?.port ? `http://localhost:${srv.port}` : null;
+  let url = null;
+  if (srv?.primary_domain) {
+    url = `https://${srv.primary_domain}`;
+  } else if (srv?.port) {
+    url = `${PUBLIC_URL}/proxy/${dep.service_id}`;
+  }
+
   const mapped = mapDeployment(dep, user);
   return res.json(mapDeploymentDetail(mapped, [], url));
 });
