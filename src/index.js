@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
-import { PORT, HOST, DATA_DIR, PUBLIC_URL } from './config.js';
+import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
 import { initDb } from './db/index.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
@@ -48,7 +48,8 @@ app.use(requestIdMiddleware);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static avatars
+// Static assets & avatars
+app.use(express.static('public'));
 app.use('/avatars', express.static(path.join(DATA_DIR, 'avatars')));
 
 // Root & Healthcheck
@@ -86,6 +87,23 @@ v1.use('/', assistantRouter);
 v1.use('/integrations/github', githubRouter);
 
 app.use('/v1', v1);
+
+// Catch-all GET fallback: redirect web app routes to FRONTEND_URL
+app.use((req, res, next) => {
+  if (req.method === 'GET' && !req.path.startsWith('/v1') && !req.path.startsWith('/proxy') && !req.path.startsWith('/avatars') && req.path !== '/health' && req.path !== '/') {
+    return res.redirect(`${FRONTEND_URL}${req.originalUrl}`);
+  }
+  next();
+});
+
+// 404 handler for unmatched routes
+app.use((req, res) => {
+  res.status(404).json({
+    code: 'not_found',
+    message: `Cannot ${req.method} ${req.path}`,
+    requestId: req.id || 'req_unknown'
+  });
+});
 
 // Error Handler
 app.use(errorHandler);

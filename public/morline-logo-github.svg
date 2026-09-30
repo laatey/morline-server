@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Solid Pure White Background -->
+  <rect width="512" height="512" fill="#FFFFFF"/>
+  <!-- Centered Morline Monolith Prisms -->
+  <g transform="translate(64, 64) scale(12)">
+    <path d="M5 14.8Q5 11 8.14 8.85L11.36 6.65Q14.5 4.5 14.5 8.3V14.2Q14.5 18 11.36 20.15L8.14 22.35Q5 24.5 5 20.7Z" fill="#000000"/>
+    <path d="M17.5 17.8Q17.5 14 20.64 11.85L23.86 9.65Q27 7.5 27 11.3V17.2Q27 21 23.86 23.15L20.64 25.35Q17.5 27.5 17.5 23.7Z" fill="#000000"/>
+  </g>
+</svg>

@@ -28,6 +28,10 @@ export const PUBLIC_URL = process.env.PUBLIC_URL ||
   (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : null) ||
   (BASE_DOMAIN && BASE_DOMAIN !== 'localhost' ? `https://api.${BASE_DOMAIN}` : `http://localhost:${PORT}`);
 
+// Frontend Application URL (e.g. https://morline.space)
+export const FRONTEND_URL = process.env.FRONTEND_URL ||
+  (BASE_DOMAIN && BASE_DOMAIN !== 'localhost' ? `https://${BASE_DOMAIN}` : 'http://localhost:5173');
+
 // Cloudflare Tunnel Token (optional, for token-based cloudflared tunnel execution on Railway)
 export const CLOUDFLARE_TUNNEL_TOKEN = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN || null;
 

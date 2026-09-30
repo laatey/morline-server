@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { execute, queryOne, queryAll } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validationError, conflict } from '../middleware/error-handler.js';
-import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL } from '../config.js';
+import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL, FRONTEND_URL } from '../config.js';
 import { buildManager } from '../engine/build-manager.js';
 import {
   generateGitHubAppJwt,
@@ -21,7 +21,7 @@ router.get('/callback', async (req, res, next) => {
     const { code, state: teamId, installation_id, setup_action, error } = req.query;
 
     if (error) {
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
+      return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
     }
 
     // Case 1: GitHub App Installation callback
@@ -60,7 +60,7 @@ router.get('/callback', async (req, res, next) => {
           connected_at = excluded.connected_at
       `, targetTeamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, instId, now);
 
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+      return res.redirect(`${FRONTEND_URL}/settings/integrations?github_connected=true`);
     }
 
     // Case 2: OAuth Code Exchange callback
@@ -89,7 +89,7 @@ router.get('/callback', async (req, res, next) => {
 
       const tokenData = await tokenRes.json();
       if (tokenData.error) {
-        return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
+        return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
       }
 
       const accessToken = tokenData.access_token;
@@ -117,7 +117,7 @@ router.get('/callback', async (req, res, next) => {
           connected_at = excluded.connected_at
       `, teamId, account, `https://github.com/${account}`, accessToken, now);
 
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+      return res.redirect(`${FRONTEND_URL}/settings/integrations?github_connected=true`);
     }
 
     throw validationError('Missing code or installation_id in GitHub callback');
