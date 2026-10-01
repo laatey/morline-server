@@ -83,12 +83,13 @@ function npmNixpacksInstallCommand(cwd) {
   const install = 'npm install --include=dev --include=optional --no-audit --no-fund';
   if (!hasLock) return install;
 
-  // npm can generate a platform-specific lockfile when node_modules already
-  // exists (for example, when the lock was refreshed on Windows). Rebuild the
-  // lock metadata in the Linux build container before npm ci so optional native
-  // packages for this target platform are present. The workspace is an isolated
-  // checkout, so this does not modify the user's repository.
-  return `npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund`;
+  // A lockfile created on another OS can omit a platform-specific optional
+  // package (for example a Linux native binding for Vite/Rolldown). npm does
+  // not repair that lockfile merely with --package-lock-only. Recreate it in
+  // the Linux build container, then use npm ci for the actual installation.
+  // The workspace is an isolated checkout, so neither command changes the
+  // user's repository.
+  return `rm -rf node_modules package-lock.json npm-shrinkwrap.json && npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund`;
 }
 
 class BuildManager {
