@@ -1,13 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
-import { PORT, HOST, DATA_DIR, PUBLIC_URL } from './config.js';
+import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
 import { initDb } from './db/index.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { reverseProxyMiddleware } from './engine/reverse-proxy.js';
-import { processSupervisor } from './engine/process-supervisor.js';
+import { containerSupervisor } from './engine/container-supervisor.js';
 import { tunnelManager } from './engine/tunnel-manager.js';
 
 // Import route modules
@@ -32,9 +32,21 @@ initDb();
 
 const app = express();
 
-// Enable CORS for frontend applications
+const allowedOrigins = new Set(
+  [FRONTEND_URL, ...(process.env.CORS_ORIGINS || '').split(',')]
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
+
+// Only permit configured browser origins to make credentialed API calls.
 app.use(cors({
-  origin: true,
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept']
@@ -228,8 +240,8 @@ function handleShutdown(signal) {
   tunnelManager.stop();
   server.close(async () => {
     // Terminate any active child processes
-    for (const [serviceId] of processSupervisor.processes) {
-      await processSupervisor.stopService(serviceId, true);
+    for (const [serviceId] of containerSupervisor.processes) {
+      await containerSupervisor.stopService(serviceId, true);
     }
     console.log('Server and processes terminated cleanly.');
     process.exit(0);

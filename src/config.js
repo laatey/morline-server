@@ -36,9 +36,11 @@ export const FRONTEND_URL = process.env.FRONTEND_URL ||
 export const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
 
 // Cloudflare Tunnel Token (optional, for token-based cloudflared tunnel execution on Railway)
-export const CLOUDFLARE_TUNNEL_TOKEN = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN || null;
+export const CLOUDFLARE_TUNNEL_TOKEN = process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true'
+  ? (process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN || null)
+  : null;
 
-export const JWT_SECRET = process.env.JWT_SECRET || 'morline-super-secret-production-jwt-key-2026';
+export const JWT_SECRET = process.env.JWT_SECRET || null;
 export const JWT_EXPIRES_IN = '7d';
 export const REFRESH_EXPIRES_DAYS = 30;
 
@@ -85,5 +87,9 @@ export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.opena
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
 export const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || null;
+
+if (process.env.NODE_ENV === 'production' && !JWT_SECRET) {
+  throw new Error('JWT_SECRET must be set when NODE_ENV=production');
+}
 
 

@@ -4,7 +4,7 @@ import { execute, queryOne, queryAll, transaction } from '../db/index.js';
 import { mapService, mapServiceDetail, mapDeployment, mapDomain, mapVariable, mapVolume } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound, conflict, validationError } from '../middleware/error-handler.js';
-import { processSupervisor } from '../engine/process-supervisor.js';
+import { containerSupervisor } from '../engine/container-supervisor.js';
 import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
@@ -169,7 +169,7 @@ router.patch('/services/:serviceId', (req, res, next) => {
 // DELETE /services/:serviceId
 router.delete('/services/:serviceId', async (req, res) => {
   const service = getService(req.params.serviceId);
-  await processSupervisor.stopService(service.id, true);
+  await containerSupervisor.stopService(service.id, true);
   execute('DELETE FROM services WHERE id = ?', service.id);
 
   eventBus.emitEnvironmentEvent(service.environment_id, {
@@ -197,7 +197,7 @@ router.post('/services/:serviceId/restart', async (req, res, next) => {
       data: { id: service.id, status: 'deploying' }
     });
 
-    processSupervisor.restartService(service.id).catch(err => {
+    containerSupervisor.restartService(service.id).catch(err => {
       console.error('[Restart Error]', err);
     });
 
@@ -211,7 +211,7 @@ router.post('/services/:serviceId/restart', async (req, res, next) => {
 // POST /services/:serviceId/sleep
 router.post('/services/:serviceId/sleep', async (req, res) => {
   const service = getService(req.params.serviceId);
-  await processSupervisor.stopService(service.id, true);
+  await containerSupervisor.stopService(service.id, true);
   execute('UPDATE services SET status = ? WHERE id = ?', 'sleeping', service.id);
 
   eventBus.emitEnvironmentEvent(service.environment_id, {

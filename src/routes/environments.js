@@ -249,6 +249,7 @@ router.post('/:environmentId/services', async (req, res, next) => {
     const sourceImage = source?.image || null;
     const sourceTemplateId = templateId || source?.templateId || null;
     const sourceDisplay = source?.display || serviceName;
+    const isGithubImport = source?.type === 'github' || Boolean(sourceUrl);
 
     let logo = 'js';
     let kind = 'app';
@@ -302,7 +303,20 @@ router.post('/:environmentId/services', async (req, res, next) => {
       data: serviceMapped
     });
 
-    if (deploy) {
+    // A repository import needs a configuration step first. Most applications
+    // require secrets or a monorepo root before a useful first deployment.
+    // Record it in staged changes so the user can edit Settings and Variables,
+    // then deploy everything deliberately from the staged-change action.
+    if (isGithubImport) {
+      createStagedChange({
+        environmentId: env.id,
+        serviceId,
+        serviceName,
+        type: 'source.import',
+        summary: `Imported ${serviceName} from GitHub — configure settings and variables before deploying`,
+        payload: { source: 'github', repository: sourceRepo, branch: sourceBranch }
+      });
+    } else if (deploy) {
       const depId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
       execute(`
         INSERT INTO deployments (id, service_id, service_name, environment_id, state, trigger, created_by, created_at)

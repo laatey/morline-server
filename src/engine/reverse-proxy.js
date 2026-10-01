@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { queryOne } from '../db/index.js';
-import { portManager } from './port-manager.js';
+import { containerSupervisor } from './container-supervisor.js';
 import { BASE_DOMAIN } from '../config.js';
 
 export function reverseProxyMiddleware(req, res, next) {
@@ -41,8 +41,8 @@ export function reverseProxyMiddleware(req, res, next) {
     return next();
   }
 
-  const port = portManager.getPort(targetServiceId);
-  if (!port) {
+  const endpoint = containerSupervisor.endpointForService(targetServiceId);
+  if (!endpoint) {
     return res.status(503).json({
       code: 'service_offline',
       message: 'The requested service is not currently running or deployed'
@@ -50,8 +50,8 @@ export function reverseProxyMiddleware(req, res, next) {
   }
 
   const proxyReq = http.request({
-    hostname: '127.0.0.1',
-    port,
+    hostname: endpoint.host,
+    port: endpoint.port,
     path: targetPath,
     method: req.method,
     headers: {
@@ -66,11 +66,11 @@ export function reverseProxyMiddleware(req, res, next) {
   });
 
   proxyReq.on('error', (err) => {
-    console.error(`[ReverseProxy] Error forwarding to service ${targetServiceId} on port ${port}:`, err.message);
+    console.error(`[ReverseProxy] Error forwarding to service ${targetServiceId} at ${endpoint.host}:${endpoint.port}:`, err.message);
     if (!res.headersSent) {
       res.status(502).json({
         code: 'bad_gateway',
-        message: 'Could not connect to backend service process'
+        message: 'Could not connect to the service container'
       });
     }
   });

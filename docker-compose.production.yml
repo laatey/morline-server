@@ -1,0 +1,22 @@
+services:
+  morline-api:
+    build: .
+    container_name: morline-api
+    env_file: /etc/morline/morline.env
+    environment:
+      HOST_DATA_DIR: /opt/morline/data
+    ports:
+      - "80:3001"
+    volumes:
+      - /opt/morline/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?Docker socket group id is required}"
+    networks:
+      - morline-runtime
+    restart: unless-stopped
+    init: true
+
+networks:
+  morline-runtime:
+    name: morline-runtime

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { APPS_DIR, GITHUB_TOKEN } from '../config.js';
 import * as dbModule from '../db/index.js';
 import { logManager } from './log-manager.js';
-import { processSupervisor } from './process-supervisor.js';
+import { containerSupervisor } from './container-supervisor.js';
 import { eventBus } from './event-bus.js';
 import { getRepoInstallationToken, getInstallationToken } from '../services/github-app.js';
 import {
@@ -190,7 +190,12 @@ server.listen(port, '0.0.0.0', () => {
     this._checkCancelled(ctx);
 
     // 2. Monorepo root directory + project detection
-    const workDir = this._resolveWorkDir(ctx, settings);
+    // Railway configuration is imported once into the same persisted settings
+    // that the Settings panel reads and writes. It is not a hidden deployment
+    // override: after import, users can see and change every imported value.
+    this._importRailwaySettings(ctx, settings);
+    const currentSettings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', serviceId) || settings;
+    let workDir = this._resolveWorkDir(ctx, currentSettings);
     const detected = detectProject(workDir);
     const overrides = this._readProjectConfig(ctx, workDir);
     detected.notes.forEach((n) => ctx.log('info', `[Detect] ${n}`));
@@ -198,86 +203,101 @@ server.listen(port, '0.0.0.0', () => {
     const vars = { ...this._loadVariables(serviceId), ...overrides.env };
     Object.values(vars).forEach((v) => ctx.secrets.add(v));
 
-    const userInstall = (settings.install_command || '').trim() || overrides.install || '';
-    const userBuild = (settings.build_command || '').trim() || overrides.build || '';
-    const userStart = (settings.start_command || '').trim();
+    const userInstall = (currentSettings.install_command || '').trim() || overrides.install || '';
+    const userBuild = (currentSettings.build_command || '').trim() || overrides.build || '';
+    const userStart = (currentSettings.start_command || '').trim();
     const customStart = userStart && !GENERIC_START_DEFAULTS.has(userStart) ? userStart : overrides.start || '';
 
     const installCommand = userInstall || detected.install;
     const buildCommand = userBuild || detected.build;
+    const dockerfilePath = (currentSettings.dockerfile_path || '').trim() || (fs.existsSync(path.join(workDir, 'Dockerfile')) ? 'Dockerfile' : '');
+    const hasNixpacks = ['nixpacks.toml', 'nixpacks.json'].some((name) => fs.existsSync(path.join(workDir, name)));
+    const composePath = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+      .find((name) => fs.existsSync(path.join(workDir, name))) || null;
+    const buildStrategy = composePath ? 'compose' : (dockerfilePath ? 'dockerfile' : 'nixpacks');
 
     ctx.log('info',
       `[Detect] ${detected.language}${detected.framework ? `/${detected.framework}` : ''}` +
       `${detected.packageManager ? ` (${detected.packageManager})` : ''}`);
 
-    // 3. Pre-flight checks
-    const timeoutMs = Number(settings.build_timeout_seconds) > 0
-      ? Number(settings.build_timeout_seconds) * 1000
+    if (composePath) ctx.log('info', `[Detect] Found ${composePath}; deploying its Compose service stack`);
+    if (hasNixpacks) ctx.log('info', '[Detect] Found Nixpacks configuration; applying it to the image build');
+    ctx.log('info', `[Build] Container strategy: ${buildStrategy}${dockerfilePath ? ` (${dockerfilePath})` : ' (Nixpacks)'}`);
+
+    // 3. Legacy project detection runs only for source validation and explicit build
+    // commands. Container builds own dependency installation and start processes.
+    const timeoutMs = Number(currentSettings.build_timeout_seconds) > 0
+      ? Number(currentSettings.build_timeout_seconds) * 1000
       : DEFAULT_TIMEOUT_MS;
     const env = { ...baseEnv(), ...detected.env, ...vars };
 
-    await this._requireTools(ctx, detected.tools, env, workDir);
-    if (detected.language === 'node') this._warnNodeVersion(ctx, workDir);
-
-    // 4. Install (retried once: registries are flaky)
-    if (installCommand) {
-      await this._phase(ctx, 'Install', installCommand, workDir,
-        { ...env, NODE_ENV: 'development', npm_config_production: 'false' },
-        { attempts: 2, timeoutMs });
-    }
-
-    // 5. Build
-    if (buildCommand) {
-      await this._phase(ctx, 'Build', buildCommand, workDir,
-        { ...env, NODE_ENV: vars.NODE_ENV || 'production' },
-        { attempts: 1, timeoutMs });
+    // 4. Build an immutable OCI image. A Dockerfile is authoritative; otherwise
+    // Nixpacks creates an equivalent Docker image from source and nixpacks config.
+    if (buildStrategy !== 'compose') {
+      const image = await containerSupervisor.build(serviceId, deploymentId, {
+        cwd: workDir,
+        strategy: buildStrategy,
+        dockerfilePath,
+        startCommand: customStart,
+        onLog: (level, message) => ctx.log(level, `[Container build] ${message}`)
+      });
+      execute('UPDATE deployments SET image = ? WHERE id = ?', image, deploymentId);
     }
     this._checkCancelled(ctx);
 
-    // 6. Start command (after build, so compiled output can be inspected)
-    let startCommand = customStart;
-    let staticDir = null;
-    if (!startCommand) {
-      const resolved = resolveStart(workDir, detected);
-      if (!resolved) {
-        throw new BuildError(
-          'Could not work out how to start this project. Add a Procfile ("web: <command>"), ' +
-          'a morline.json with {"start": "<command>"}, or set a start command in service settings.'
-        );
-      }
-      startCommand = resolved.command;
-      staticDir = resolved.staticDir || null;
-      if (resolved.warn) ctx.log('warn', `[Deploy] ${resolved.warn}`);
-    }
-
-    if (staticDir) {
-      const dir = path.join(workDir, '.morline');
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'static-server.cjs'), STATIC_SERVER_SOURCE, 'utf-8');
-      ctx.log('info', `[Deploy] Static site detected in "${staticDir}/" — using built-in static server`);
-    }
-
-    // 7. Deploy
+    // 5. Deploy isolated Docker containers or a Compose stack.
     execute('UPDATE deployments SET state = ? WHERE id = ?', 'deploying', deploymentId);
     ctx.emit('deployment.updated', { id: deploymentId, state: 'deploying' });
-    ctx.log('info', `[Deploy] Launching process: ${startCommand}`);
-
-    const runtimeEnv = {
-      ...detected.runtimeEnv,
-      ...(detected.language === 'node' ? { NODE_ENV: 'production' } : {}),
-      ...vars
-    };
-
-    // NOTE: the resolved command is deliberately NOT written back to service_settings.
-    // Persisting it made stale auto-detected commands look like user-set ones on later deploys.
-    await processSupervisor.startService(serviceId, deploymentId, {
-      cwd: workDir,
-      command: startCommand,
-      env: runtimeEnv
-    });
+    if (buildStrategy === 'compose') {
+      ctx.log('info', `[Deploy] Starting Compose stack from ${composePath}`);
+      await containerSupervisor.startComposeService(serviceId, deploymentId, {
+        cwd: workDir, composePath: path.join(workDir, composePath), onLog: (level, message) => ctx.log(level, `[Compose] ${message}`)
+      });
+    } else {
+      const deployment = queryOne('SELECT image FROM deployments WHERE id = ?', deploymentId);
+      ctx.log('info', `[Deploy] Starting container image: ${deployment.image}`);
+      await containerSupervisor.startService(serviceId, deploymentId, { image: deployment.image });
+    }
   }
 
   // ------------------------------------------------------------------ source: github
+
+  _importRailwaySettings(ctx, settings) {
+    // Read from the repository root, before root_directory is applied.
+    const railway = readJsonSafe(ctx.cwd, 'railway.json');
+    const deploy = railway?.deploy;
+    if (!deploy || typeof deploy !== 'object') return;
+
+    const sourceStart = String(deploy.startCommand || '').trim();
+    const rootMatch = sourceStart.match(/^\s*cd\s+([^\s;&|]+)\s*&&\s*/i);
+    const rootDirectory = rootMatch?.[1]?.replace(/^\.\//, '') || '';
+    const startCommand = rootMatch ? sourceStart.slice(rootMatch[0].length).trim() : sourceStart;
+    const updates = [];
+    const params = [];
+
+    // Only fill platform defaults. Once a value exists in Settings, the user
+    // owns it and future deployments never replace it from railway.json.
+    if (!String(settings.root_directory || '').trim() && rootDirectory) {
+      const candidate = path.resolve(ctx.cwd, rootDirectory);
+      if (candidate.startsWith(ctx.cwd + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        updates.push('root_directory = ?');
+        params.push(rootDirectory);
+      }
+    }
+    if (startCommand && (!String(settings.start_command || '').trim() || GENERIC_START_DEFAULTS.has(String(settings.start_command).trim()))) {
+      updates.push('start_command = ?');
+      params.push(startCommand);
+    }
+    if (deploy.healthcheckPath && (!String(settings.healthcheck_path || '').trim() || settings.healthcheck_path === '/')) {
+      updates.push('healthcheck_path = ?');
+      params.push(String(deploy.healthcheckPath));
+    }
+    if (!updates.length) return;
+
+    params.push(ctx.serviceId);
+    execute(`UPDATE service_settings SET ${updates.join(', ')} WHERE service_id = ?`, ...params);
+    ctx.log('info', `[Detect] Imported Railway configuration into this service's Settings`);
+  }
 
   async _syncGithub(ctx, service) {
     const repo = String(service.source_repo)

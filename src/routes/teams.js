@@ -7,6 +7,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { notFound, forbidden, conflict, validationError } from '../middleware/error-handler.js';
 import { buildManager } from '../engine/build-manager.js';
 import { sendTeamInviteEmail } from '../services/email.js';
+import { createStagedChange } from '../services/staged-changes-helper.js';
 
 const router = Router();
 
@@ -420,14 +421,13 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
         `, serviceId);
       });
 
-      const depId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-      execute(`
-        INSERT INTO deployments (id, service_id, service_name, environment_id, state, trigger, created_by, created_at)
-        VALUES (?, ?, ?, ?, 'queued', 'manual', ?, ?)
-      `, depId, serviceId, srvName, envId, req.user.id, now);
-
-      buildManager.buildAndDeploy(serviceId, depId).catch(err => {
-        console.error('[BuildManager] Deploy error:', err);
+      createStagedChange({
+        environmentId: envId,
+        serviceId,
+        serviceName: srvName,
+        type: 'source.import',
+        summary: `Imported ${srvName} from GitHub — configure settings and variables before deploying`,
+        payload: { source: 'github', repository: sourceRepo, branch: sourceBranch }
       });
     }
 

@@ -1,5 +1,5 @@
 import { queryOne, queryAll } from '../db/index.js';
-import { processSupervisor } from './process-supervisor.js';
+import { containerSupervisor } from './container-supervisor.js';
 
 export class MetricsCollector {
   calculateStepSec(range) {
@@ -39,7 +39,7 @@ export class MetricsCollector {
     const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
     if (!service) return null;
 
-    const running = processSupervisor.isServiceRunning(serviceId);
+    const running = containerSupervisor.isServiceRunning(serviceId);
     const durationMs = this.getRangeDurationMs(range);
     const stepSec = this.calculateStepSec(range);
     const now = Date.now();
