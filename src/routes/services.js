@@ -9,7 +9,7 @@ import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { BASE_DOMAIN } from '../config.js';
-import { createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
+import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
 const router = Router();
 router.use('/services', requireAuth);
@@ -335,6 +335,10 @@ router.post('/services/:serviceId/deployments', async (req, res, next) => {
       INSERT INTO deployments (id, service_id, service_name, environment_id, state, trigger, created_by, created_at)
       VALUES (?, ?, ?, ?, 'queued', 'manual', ?, ?)
     `, depId, service.id, service.name, service.environment_id, req.user.id, now);
+
+    // A manual redeploy applies the current service configuration, so its pending
+    // changes should no longer appear as unapplied in the environment.
+    clearStagedChanges(service.environment_id, service.id);
 
     buildManager.buildAndDeploy(service.id, depId).catch(err => {
       console.error('[Deploy Error]', err);
