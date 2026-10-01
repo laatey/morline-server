@@ -292,6 +292,42 @@ export async function handleGitHubOAuthCallback(req, res) {
       }
     }
 
+    // Automatically link GitHub integration and match existing installation to default team
+    try {
+      const teamRow = queryOne('SELECT default_team_id FROM user_settings WHERE user_id = ?', user.id) ||
+        queryOne('SELECT team_id as default_team_id FROM team_members WHERE user_id = ? LIMIT 1', user.id);
+      const userTeamId = teamRow?.default_team_id;
+
+      if (userTeamId && ghUser?.login) {
+        let installationId = null;
+        try {
+          const { listAppInstallations } = await import('../services/github-app.js');
+          const installations = await listAppInstallations();
+          const match = installations.find(i => i.account?.login?.toLowerCase() === ghUser.login.toLowerCase());
+          if (match) {
+            installationId = match.id;
+          }
+        } catch (e) {
+          console.error('[OAuth Login] Failed checking GitHub installations:', e.message);
+        }
+
+        execute(`
+          INSERT INTO github_integration (team_id, account, install_url, access_token, installation_id, connected, connected_at)
+          VALUES (?, ?, ?, ?, ?, 1, ?)
+          ON CONFLICT(team_id) DO UPDATE SET
+            account = excluded.account,
+            access_token = excluded.access_token,
+            installation_id = COALESCE(excluded.installation_id, github_integration.installation_id),
+            connected = 1,
+            connected_at = excluded.connected_at
+        `, userTeamId, ghUser.login, `https://github.com/${ghUser.login}`, accessToken, installationId, now);
+
+        execute('UPDATE onboarding_state SET github_connected = 1 WHERE user_id = ?', user.id);
+      }
+    } catch (e) {
+      console.error('[OAuth Login] Failed linking GitHub integration:', e.message);
+    }
+
     const session = createSessionRecord(user.id, req);
 
     // Redirect to frontend with auth_session payload

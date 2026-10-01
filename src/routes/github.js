@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { execute, queryOne, queryAll } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validationError, conflict } from '../middleware/error-handler.js';
-import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL } from '../config.js';
+import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL, FRONTEND_URL } from '../config.js';
 import { buildManager } from '../engine/build-manager.js';
 import {
   generateGitHubAppJwt,
@@ -15,13 +15,33 @@ import {
 
 const router = Router();
 
+function renderPopupSuccess(res) {
+  return res.send(`<!DOCTYPE html>
+<html>
+<head><title>GitHub Connected</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #090a0f; color: #fff;">
+  <div style="text-align: center;">
+    <div style="font-size: 28px; margin-bottom: 8px; color: #22c55e;">✓</div>
+    <h3 style="margin: 0 0 8px 0; font-size: 16px;">Connected to GitHub</h3>
+    <p style="margin: 0; color: #888; font-size: 13px;">This window will close automatically...</p>
+  </div>
+  <script>
+    if (window.opener) {
+      try { window.opener.postMessage({ type: 'github_connected' }, '*'); } catch (e) {}
+    }
+    setTimeout(function() { window.close(); }, 1000);
+  </script>
+</body>
+</html>`);
+}
+
 // Callback (public endpoint, called by GitHub redirect for OAuth or App Installation)
 router.get('/callback', async (req, res, next) => {
   try {
     const { code, state: teamId, installation_id, setup_action, error } = req.query;
 
     if (error) {
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
+      return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
     }
 
     // Case 1: GitHub App Installation callback
@@ -47,9 +67,21 @@ router.get('/callback', async (req, res, next) => {
         }
       }
 
-      const targetTeamId = teamId;
+      let targetTeamId = teamId;
       if (!targetTeamId) {
-        return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent('Missing teamId in GitHub installation callback state')}`);
+        const existing = queryOne('SELECT team_id FROM github_integration WHERE account = ?', account);
+        if (existing) {
+          targetTeamId = existing.team_id;
+        } else {
+          const u = queryOne('SELECT tm.team_id FROM team_members tm JOIN users u ON u.id = tm.user_id WHERE u.email LIKE ? OR u.username LIKE ?', `${account}%`, `${account}%`);
+          if (u) {
+            targetTeamId = u.team_id;
+          }
+        }
+      }
+
+      if (!targetTeamId) {
+        return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent('Missing teamId in GitHub installation callback state')}`);
       }
       const now = new Date().toISOString();
 
@@ -63,7 +95,7 @@ router.get('/callback', async (req, res, next) => {
           connected_at = excluded.connected_at
       `, targetTeamId, account, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, instId, now);
 
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+      return renderPopupSuccess(res);
     }
 
     // Case 2: OAuth Code Exchange callback
@@ -93,7 +125,7 @@ router.get('/callback', async (req, res, next) => {
 
       const tokenData = await tokenRes.json();
       if (tokenData.error) {
-        return res.redirect(`${PUBLIC_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
+        return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
       }
 
       const accessToken = tokenData.access_token;
@@ -111,17 +143,35 @@ router.get('/callback', async (req, res, next) => {
       const account = ghUser.login || 'GitHub User';
       const now = new Date().toISOString();
 
+      // Check if user already has GitHub App installed
+      let installationId = null;
+      try {
+        const installations = await listAppInstallations();
+        const match = installations.find(i => i.account?.login?.toLowerCase() === account.toLowerCase());
+        if (match) {
+          installationId = match.id;
+        }
+      } catch (e) {
+        console.error('[GitHub App] Error checking installations in oauth callback:', e.message);
+      }
+
       execute(`
-        INSERT INTO github_integration (team_id, account, install_url, access_token, connected, connected_at)
-        VALUES (?, ?, ?, ?, 1, ?)
+        INSERT INTO github_integration (team_id, account, install_url, access_token, installation_id, connected, connected_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(team_id) DO UPDATE SET
           account = excluded.account,
           access_token = excluded.access_token,
+          installation_id = COALESCE(excluded.installation_id, github_integration.installation_id),
           connected = 1,
           connected_at = excluded.connected_at
-      `, teamId, account, `https://github.com/${account}`, accessToken, now);
+      `, teamId, account, `https://github.com/${account}`, accessToken, installationId, now);
 
-      return res.redirect(`${PUBLIC_URL}/settings/integrations?github_connected=true`);
+      // If GitHub App is configured and not yet installed by this user, guide them to install it
+      if (!installationId && GITHUB_APP_NAME) {
+        return res.redirect(`https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`);
+      }
+
+      return renderPopupSuccess(res);
     }
 
     throw validationError('Missing code or installation_id in GitHub callback');
@@ -200,9 +250,48 @@ router.get('/', async (req, res, next) => {
     let connected = Boolean(row && row.connected && (row.access_token || row.installation_id));
     let account = row?.account || null;
 
-    let installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
-    if (!GITHUB_APP_NAME && GITHUB_CLIENT_ID) {
-      installUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,read:user&state=${teamId}`;
+    // If not connected yet or missing installation_id, try auto-discovering from app installations for current user
+    if ((!connected || !row?.installation_id) && req.user) {
+      let knownLogin = null;
+      if (req.user.email?.endsWith('@github.morline.space')) {
+        knownLogin = req.user.email.split('@')[0];
+      } else if (account) {
+        knownLogin = account;
+      } else if (req.user.username && !req.user.username.startsWith('usr_')) {
+        // e.g. username created from github login
+        knownLogin = req.user.username.replace(/[0-9]+$/, '');
+      }
+
+      if (knownLogin) {
+        try {
+          const installations = await listAppInstallations();
+          const match = installations.find(i => 
+            i.account?.login?.toLowerCase() === knownLogin.toLowerCase()
+          );
+          if (match) {
+            const now = new Date().toISOString();
+            execute(`
+              INSERT INTO github_integration (team_id, account, install_url, installation_id, connected, connected_at)
+              VALUES (?, ?, ?, ?, 1, ?)
+              ON CONFLICT(team_id) DO UPDATE SET
+                account = excluded.account,
+                installation_id = excluded.installation_id,
+                connected = 1,
+                connected_at = excluded.connected_at
+            `, teamId, match.account.login, `https://github.com/apps/${GITHUB_APP_NAME}/installations/new`, match.id, now);
+            connected = true;
+            account = match.account.login;
+          }
+        } catch (e) {
+          console.error('[GitHub auto-sync error]:', e.message);
+        }
+      }
+    }
+
+    // Prefer OAuth authorize first: if user already has app installed, it connects seamlessly without asking to reinstall!
+    let installUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,read:user&state=${teamId}`;
+    if (!GITHUB_CLIENT_ID && GITHUB_APP_NAME) {
+      installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
     }
 
     return res.json({
