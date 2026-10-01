@@ -295,7 +295,7 @@ server.listen(port, '0.0.0.0', () => {
     }
     const branches = explicit ? [explicit] : ['main', 'master'];
 
-    const token = await this._resolveGithubToken(ctx, repo);
+    const token = service.source_url ? null : await this._resolveGithubToken(ctx, repo);
     let authArgs = [];
     if (token) {
       const b64 = Buffer.from(`x-access-token:${token}`).toString('base64');

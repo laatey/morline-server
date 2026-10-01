@@ -242,7 +242,8 @@ router.post('/:environmentId/services', async (req, res, next) => {
     const posX = position?.x || 100;
     const posY = position?.y || 100;
     const sourceType = source?.type || (templateId ? 'template' : 'template');
-    const sourceRepo = source?.repo || null;
+    const sourceRepo = source?.repo || (source?.url ? source.url.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '') : null);
+    const sourceUrl = source?.url || null;  // explicit public URL → anonymous clone
     const sourceBranch = source?.branch || 'main';
     const sourceRootDir = source?.rootDirectory || null;
     const sourceImage = source?.image || null;
@@ -261,9 +262,11 @@ router.post('/:environmentId/services', async (req, res, next) => {
 
     transaction(() => {
       execute(`
-        INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_root_dir, source_image, source_template_id, source_display, region, replicas, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'us-east-1', 1, ?, ?)
-      `, serviceId, env.id, serviceName, kind, logo, posX, posY, sourceType, sourceRepo, sourceBranch, sourceRootDir, sourceImage, sourceTemplateId, sourceDisplay, now, now);
+        INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_root_dir, source_url, source_image, source_template_id, source_display, region, replicas, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'us-east-1', 1, ?, ?)
+      `, serviceId, env.id, serviceName, kind, logo, posX, posY,
+        sourceUrl ? 'github' : sourceType,
+        sourceRepo, sourceBranch, sourceRootDir, sourceUrl, sourceImage, sourceTemplateId, sourceDisplay, now, now);
 
       execute(`
         INSERT INTO service_settings (service_id, branch, root_directory, auto_deploy, build_command, start_command, healthcheck_path, healthcheck_timeout_sec, restart_policy, replicas)

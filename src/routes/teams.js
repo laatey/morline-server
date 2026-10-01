@@ -395,6 +395,42 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
       });
     }
 
+    // If a public GitHub URL is provided, create a service with anonymous clone
+    const sourceUrlRaw = req.body?.source?.url || null;
+    if (sourceUrlRaw) {
+      const serviceId = `srv_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+      const sourceRepo = sourceUrlRaw.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+      const srvName = sourceRepo.split('/').pop() || name;
+      const sourceBranch = req.body?.source?.branch || 'main';
+
+      transaction(() => {
+        execute(`
+          INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_url, region, created_at, updated_at)
+          VALUES (?, ?, ?, 'app', 'js', 'queued', 100, 100, 'github', ?, ?, ?, ?, ?, ?)
+        `, serviceId, envId, srvName, sourceRepo, sourceBranch, sourceUrlRaw, region, now, now);
+
+        execute(`
+          INSERT INTO service_settings (service_id, branch, auto_deploy)
+          VALUES (?, ?, 1)
+        `, serviceId, sourceBranch);
+
+        execute(`
+          INSERT INTO service_networking (service_id, public, target_port)
+          VALUES (?, 1, 3000)
+        `, serviceId);
+      });
+
+      const depId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+      execute(`
+        INSERT INTO deployments (id, service_id, service_name, environment_id, state, trigger, created_by, created_at)
+        VALUES (?, ?, ?, ?, 'queued', 'manual', ?, ?)
+      `, depId, serviceId, srvName, envId, req.user.id, now);
+
+      buildManager.buildAndDeploy(serviceId, depId).catch(err => {
+        console.error('[BuildManager] Deploy error:', err);
+      });
+    }
+
     const proj = queryOne('SELECT * FROM projects WHERE id = ?', projectId);
     return res.status(201).json(mapProject(proj, false));
   } catch (err) {

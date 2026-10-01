@@ -123,6 +123,18 @@ function applyMigrations(db) {
       PRIMARY KEY (service_id, key)
     );
   `);
+
+  // 7. source_url on services (anonymous public repo URL)
+  const servicesCols = db.prepare('PRAGMA table_info(services);').all().map(c => c.name);
+  if (!servicesCols.includes('source_url')) {
+    db.exec('ALTER TABLE services ADD COLUMN source_url TEXT;');
+  }
+
+  // 8. base_path on service_settings (HTTP base path for reverse proxy)
+  const settingsCols = db.prepare('PRAGMA table_info(service_settings);').all().map(c => c.name);
+  if (!settingsCols.includes('base_path')) {
+    db.exec('ALTER TABLE service_settings ADD COLUMN base_path TEXT;');
+  }
 }
 
 function clean(params) {

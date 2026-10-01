@@ -60,6 +60,7 @@ function getServiceDetail(service) {
   const mappedSettings = settings ? {
     branch: settings.branch || 'main',
     rootDirectory: settings.root_directory || null,
+    basePath: settings.base_path || null,
     autoDeploy: Boolean(settings.auto_deploy),
     buildCommand: settings.build_command || null,
     startCommand: settings.start_command || 'node server.js',
@@ -121,6 +122,7 @@ router.patch('/services/:serviceId', (req, res, next) => {
 
       if (settings.branch !== undefined) { sUpdates.push('branch = ?'); sParams.push(settings.branch); }
       if (settings.rootDirectory !== undefined) { sUpdates.push('root_directory = ?'); sParams.push(settings.rootDirectory); }
+      if (settings.basePath !== undefined) { sUpdates.push('base_path = ?'); sParams.push(settings.basePath); }
       if (settings.autoDeploy !== undefined) { sUpdates.push('auto_deploy = ?'); sParams.push(settings.autoDeploy ? 1 : 0); }
       if (settings.buildCommand !== undefined) { sUpdates.push('build_command = ?'); sParams.push(settings.buildCommand); }
       if (settings.startCommand !== undefined) { sUpdates.push('start_command = ?'); sParams.push(settings.startCommand); }
@@ -798,6 +800,65 @@ router.delete('/volumes/:volumeId', (req, res) => {
   const volId = req.params.volumeId;
   execute('DELETE FROM volumes WHERE id = ?', volId);
   return res.status(204).end();
+});
+
+// ---------------------------------------------------------------------------
+// Database stubs (not implemented — return zero values)
+// ---------------------------------------------------------------------------
+
+// GET /services/:serviceId/database/collections
+router.get('/services/:serviceId/database/collections', (req, res) => {
+  getService(req.params.serviceId); // 404 if not found
+  return res.json({ data: [] });
+});
+
+// GET /services/:serviceId/database/collections/:name
+router.get('/services/:serviceId/database/collections/:name', (req, res) => {
+  getService(req.params.serviceId);
+  return res.json({ data: [] });
+});
+
+// GET /services/:serviceId/database/connection
+router.get('/services/:serviceId/database/connection', (req, res) => {
+  getService(req.params.serviceId);
+  return res.json({
+    host: null,
+    port: null,
+    user: null,
+    password: null,
+    database: null,
+    url: null,
+    publicUrl: null
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backup stubs (not implemented — return zero values)
+// ---------------------------------------------------------------------------
+
+// GET /services/:serviceId/backups
+router.get('/services/:serviceId/backups', (req, res) => {
+  getService(req.params.serviceId);
+  return res.json({ data: [] });
+});
+
+// POST /services/:serviceId/backups
+router.post('/services/:serviceId/backups', (req, res) => {
+  getService(req.params.serviceId);
+  const id = `bkp_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  return res.status(202).json({
+    id,
+    createdAt: new Date().toISOString(),
+    size: null,
+    status: 'pending',
+    kind: 'manual'
+  });
+});
+
+// POST /services/:serviceId/backups/:backupId/restore
+router.post('/services/:serviceId/backups/:backupId/restore', (req, res) => {
+  getService(req.params.serviceId);
+  return res.status(202).json({ status: 'pending', backupId: req.params.backupId });
 });
 
 export default router;
