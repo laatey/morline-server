@@ -64,6 +64,33 @@ function baseEnv() {
   };
 }
 
+function hasNixpacksInstallCommand(cwd) {
+  const json = readJsonSafe(cwd, 'nixpacks.json');
+  const install = json?.phases?.install;
+  if (install && (typeof install.cmd === 'string' || Array.isArray(install.cmds))) return true;
+
+  try {
+    const toml = fs.readFileSync(path.join(cwd, 'nixpacks.toml'), 'utf8');
+    const section = toml.match(/^\s*\[phases\.install\]\s*\r?\n([\s\S]*?)(?=^\s*\[|\s*$)/m)?.[1] || '';
+    return /^\s*(?:cmd|cmds)\s*=/m.test(section);
+  } catch {
+    return false;
+  }
+}
+
+function npmNixpacksInstallCommand(cwd) {
+  const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((name) => fs.existsSync(path.join(cwd, name)));
+  const install = 'npm install --include=dev --include=optional --no-audit --no-fund';
+  if (!hasLock) return install;
+
+  // npm can generate a platform-specific lockfile when node_modules already
+  // exists (for example, when the lock was refreshed on Windows). Rebuild the
+  // lock metadata in the Linux build container before npm ci so optional native
+  // packages for this target platform are present. The workspace is an isolated
+  // checkout, so this does not modify the user's repository.
+  return `npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund`;
+}
+
 class BuildManager {
   /** serviceId -> { deploymentId, child, kill, cancelled, superseded, done } */
   active = new Map();
@@ -215,6 +242,14 @@ server.listen(port, '0.0.0.0', () => {
     const composePath = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
       .find((name) => fs.existsSync(path.join(workDir, name))) || null;
     const buildStrategy = composePath ? 'compose' : (dockerfilePath ? 'dockerfile' : 'nixpacks');
+    let nixpacksInstallCommand = userInstall || overrides.install || '';
+    if (
+      buildStrategy === 'nixpacks' && detected.language === 'node' && detected.packageManager === 'npm' &&
+      !nixpacksInstallCommand && !hasNixpacksInstallCommand(workDir)
+    ) {
+      nixpacksInstallCommand = npmNixpacksInstallCommand(workDir);
+      ctx.log('info', '[Build] npm install will include optional native packages for the Linux build platform');
+    }
 
     ctx.log('info',
       `[Detect] ${detected.language}${detected.framework ? `/${detected.framework}` : ''}` +
@@ -238,6 +273,7 @@ server.listen(port, '0.0.0.0', () => {
         cwd: workDir,
         strategy: buildStrategy,
         dockerfilePath,
+        installCommand: nixpacksInstallCommand,
         startCommand: customStart,
         onLog: (level, message) => ctx.log(level, `[Container build] ${message}`)
       });

@@ -74,7 +74,7 @@ export class ContainerSupervisor {
     return info ? this.endpoint(serviceId, info.port) : null;
   }
 
-  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, startCommand, onLog }) {
+  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, installCommand, startCommand, onLog }) {
     const image = imageName(serviceId, deploymentId);
     const log = (level, line) => onLog?.(level, line);
     if (strategy === 'dockerfile') {
@@ -88,6 +88,7 @@ export class ContainerSupervisor {
       const restoreIgnore = prepareNixpacksDockerignore(cwd);
       try {
         const args = ['build', cwd, '--name', image];
+        if (installCommand) args.push('--install-cmd', installCommand);
         // Settings is the one source of truth for an explicit start command.
         // Nixpacks' own config remains in effect when the field is blank.
         if (startCommand) args.push('--start-cmd', startCommand);
