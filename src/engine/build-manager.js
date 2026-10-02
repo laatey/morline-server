@@ -80,7 +80,12 @@ function hasNixpacksInstallCommand(cwd) {
 
 function npmNixpacksInstallCommand(cwd) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((name) => fs.existsSync(path.join(cwd, name)));
-  const install = 'npm install --include=dev --include=optional --no-audit --no-fund';
+  // Rolldown is used by current Vite releases. Its platform bindings are npm
+  // optional dependencies, which npm can omit even after resolving on Linux.
+  // Install the exact binding version after dependencies are present. Nixpacks
+  // builds on Morline's x86_64 Ubuntu image, so this is the matching target.
+  const ensureRolldownBinding = `if [ -f node_modules/rolldown/package.json ]; then rolldown_version=$(node -p "require('./node_modules/rolldown/package.json').version"); npm install --no-save --no-package-lock --include=optional --no-audit --no-fund "@rolldown/binding-linux-x64-gnu@$rolldown_version"; fi`;
+  const install = `npm install --include=dev --include=optional --no-audit --no-fund && ${ensureRolldownBinding}`;
   if (!hasLock) return install;
 
   // A lockfile created on another OS can omit a platform-specific optional
@@ -89,7 +94,7 @@ function npmNixpacksInstallCommand(cwd) {
   // the Linux build container, then use npm ci for the actual installation.
   // The workspace is an isolated checkout, so neither command changes the
   // user's repository.
-  return `rm -rf node_modules package-lock.json npm-shrinkwrap.json && npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund`;
+  return `rm -rf node_modules package-lock.json npm-shrinkwrap.json && npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund && ${ensureRolldownBinding}`;
 }
 
 class BuildManager {
