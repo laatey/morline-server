@@ -58,33 +58,43 @@ function run(command, args, { cwd, env, onLine, stderrLevel = 'error' } = {}) {
 function prepareNixpacksRuntime(cwd, runtime) {
   if (!runtime?.version || runtime.runtime !== 'node') return () => {};
   const file = path.join(cwd, 'nixpacks.toml');
-  const existed = fs.existsSync(file);
-  const original = existed ? fs.readFileSync(file, 'utf8') : null;
 
-  if (!existed) {
-    // No nixpacks.toml in the project — create a minimal one that pins the
-    // resolved Node major so Nixpacks does not fall back to its own default.
-    fs.writeFileSync(file, `[phases.setup]\nnixPkgs = ["nodejs_${runtime.version}"]\n`);
-    return () => fs.rmSync(file, { force: true });
+  // ARCHITECTURAL CONTRACT — do NOT write nodejs_XX to nixpacks.toml.
+  //
+  // Nixpacks v1.41 maps each Node major to a DIFFERENT nixpkgs archive:
+  //   Node 18/20 → ffeebf0acf3ae8b29f8c7049cd911b9636efd7e7
+  //   Node 22    → e6f23dc08d3624daab7094b701aa3954923c6bbb
+  //   Node 24    → 23f9169c4ccce521379e602cc82ed873a1f1b52b
+  //
+  // Custom nixPkgs entries in nixpacks.toml are evaluated against the
+  // DEFAULT nixpkgs archive (Node 18/20 archive). That archive does NOT
+  // contain nodejs_24, nodejs_22_x, etc. Writing nodejs_24 there produces:
+  //   "error: undefined variable 'nodejs_24'"
+  //
+  // The correct mechanism is NIXPACKS_NODE_VERSION (passed as an env var to
+  // the nixpacks CLI). Nixpacks then selects the correct per-version archive
+  // and adds the right nodejs_XX package entirely internally.
+  //
+  // For projects whose nixpacks.toml already declares nodejs_XX:
+  //   Strip those tokens so Nixpacks' own Node selection takes over via
+  //   NIXPACKS_NODE_VERSION. All other nixPkgs entries are left intact.
+  //   The original file is restored after the build completes.
+  if (!fs.existsSync(file)) {
+    // No nixpacks.toml — NIXPACKS_NODE_VERSION env var alone is sufficient.
+    return () => {};
   }
 
-  // File exists — replace any nodejs_XX[_x] tokens with the resolved major.
-  // If the file has no such token, inject the package into the first nixPkgs
-  // array found in [phases.setup], or append a new [phases.setup] section.
-  let updated = original.replace(/nodejs[_-]\d+(_x)?/g, `nodejs_${runtime.version}`);
-  if (updated === original) {
-    // No existing nodejs token: inject into an existing nixPkgs array if present.
-    const injected = original.replace(
-      /(\[phases\.setup\][^\[]*nixPkgs\s*=\s*\[)([^\]]*)(\])/,
-      (_, open, inner, close) => {
-        const sep = inner.trim() ? ', ' : '';
-        return `${open}${inner}${sep}"nodejs_${runtime.version}"${close}`;
-      }
-    );
-    updated = injected !== original ? injected
-      : `${original.trimEnd()}\n\n[phases.setup]\nnixPkgs = ["nodejs_${runtime.version}"]\n`;
-  }
-  fs.writeFileSync(file, updated);
+  const original = fs.readFileSync(file, 'utf8');
+  // Strip nodejs_XX tokens from any nixPkgs array. Order matters:
+  //   1. Remove "nodejs_XX", (when nodejs is not the last entry)
+  //   2. Remove , "nodejs_XX"  (when nodejs is not the first entry)
+  //   3. Remove "nodejs_XX"    (isolated — only entry in the array)
+  let stripped = original
+    .replace(/"nodejs[_-]\d[^"]*"\s*,\s*/g, '')
+    .replace(/,\s*"nodejs[_-]\d[^"]*"/g, '')
+    .replace(/"nodejs[_-]\d[^"]*"/g, '');
+  if (stripped === original) return () => {};
+  fs.writeFileSync(file, stripped);
   return () => fs.writeFileSync(file, original);
 }
 
@@ -131,6 +141,24 @@ export class ContainerSupervisor {
         // and has no effect on build-time package selection.
         const env = runtime?.runtime === 'node' && runtime.version ? { NIXPACKS_NODE_VERSION: runtime.version } : undefined;
         await run('nixpacks', args, { cwd, env, onLine: log, stderrLevel: 'info' });
+
+        // Post-build verification: log actual Node version and platform inside
+        // the built image. This confirms that NIXPACKS_NODE_VERSION propagated
+        // correctly through the build toolchain. Uses a transient container that
+        // is removed immediately after the check.
+        if (runtime?.runtime === 'node') {
+          try {
+            const verifyScript = [
+              `node --version`,
+              `npm --version`,
+              `node -p "process.platform + '/' + process.arch"`,
+            ].join(' && ');
+            const verifyArgs = ['run', '--rm', '--entrypoint', 'sh', image, '-c', verifyScript];
+            await run('docker', verifyArgs, { onLine: (_, line) => log('info', `[Container verify] ${line}`) });
+          } catch {
+            // Non-fatal: some minimal images may not have sh in the default PATH
+          }
+        }
       } finally {
         restoreRuntime();
         restoreIgnore();

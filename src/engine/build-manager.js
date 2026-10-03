@@ -81,8 +81,30 @@ function hasNixpacksInstallCommand(cwd) {
 
 function npmNixpacksInstallCommand(cwd) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((name) => fs.existsSync(path.join(cwd, name)));
-  // Preserve a project lockfile. It is the reproducible dependency contract.
-  return hasLock ? 'npm ci --include=dev --include=optional --no-audit --no-fund' : 'npm install --include=dev --include=optional --no-audit --no-fund';
+  // `npm install` (not `npm ci`) is intentional for the Nixpacks build phase.
+  //
+  // `npm ci` uses the lockfile strictly: it only installs packages that are
+  // already present in the lockfile. Cross-platform lockfiles (e.g. created
+  // on macOS) may omit Linux-specific optional native bindings such as
+  // @rolldown/binding-linux-x64-gnu. npm ci silently skips those packages,
+  // causing "Cannot find module" errors at build time.
+  //
+  // `npm install` with a lockfile present reads the lockfile for version
+  // pinning but ALSO resolves optional platform-specific dependencies for the
+  // CURRENT platform (Linux x64 glibc in the Nixpacks container). This
+  // correctly installs native bindings regardless of where the lockfile was
+  // originally generated.
+  //
+  // This is safe in Morline's architecture: the build workspace is synced
+  // fresh from git before every deployment (_syncGithub overwrites local
+  // changes), so lockfile modifications in the workspace do not affect the
+  // customer's repository.
+  //
+  // --include=dev  : build tools (typescript, vite, etc.)
+  // --include=optional : platform-specific native bindings (rolldown, esbuild, etc.)
+  return hasLock
+    ? 'npm install --include=dev --include=optional --no-audit --no-fund'
+    : 'npm install --include=dev --include=optional --no-audit --no-fund';
 }
 
 class BuildManager {

@@ -1,11 +1,37 @@
+// runtime-resolver.js
+// Determines the language runtime for a project directory.
+//
+// ARCHITECTURE: Two distinct concepts are maintained separately:
+//
+// 1. SEMANTIC SUPPORT — "Morline advertises Node X as supported"
+//    Governed by SUPPORTED_NODE. Each entry records the actual minor/patch
+//    version that the build platform ships for that major, used for evaluating
+//    semver engine constraints from package.json / lockfiles.
+//
+// 2. PROVISIONING COMPATIBILITY — "this exact Nixpacks/Nixpkgs environment
+//    can provision Node X"
+//    Governed by NIXPACKS_NODE_ARCHIVES. Each entry maps a Node major to the
+//    specific nixpkgs archive hash that Nixpacks v1.41 uses when
+//    NIXPACKS_NODE_VERSION=<major> is set.
+//
+//    Source: Nixpacks v1.41 src/providers/node/mod.rs AVAILABLE_NODE_VERSIONS
+//    URL: https://github.com/railwayapp/nixpacks/blob/main/src/providers/node/mod.rs
+//
+//    IMPORTANT: These archives are specific to the installed Nixpacks binary.
+//    If Nixpacks is upgraded, verify that the archives still match.
+//
+// The resolved runtime exposes nixpacksArchive so that:
+//  a) The build pipeline can validate that a runtime is actually provisionable
+//     before attempting a build (fail-fast, not fail-during-nix-eval).
+//  b) Morline never silently provisions a different version than resolved.
+
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Versions registered here are used for constraint evaluation only.
-// Each entry represents the actual Node version that the build platform ships
-// for that major. Keep these accurate: an overly-optimistic version causes the
-// resolver to select a major whose platform binary does not satisfy the
-// constraint at runtime.
+// SUPPORTED_NODE: Node versions Morline advertises as supported.
+// version[] is the actual binary version the build platform ships for that
+// major, used for semver engine constraint evaluation. Keep accurate:
+// an overly-optimistic version passes constraints that fail at runtime.
 //
 // Nixpacks v1.41 ships:
 //   nodejs_18 → 18.20.x  nodejs_20 → 20.19.x
@@ -13,10 +39,41 @@ import path from 'node:path';
 const SUPPORTED_NODE = [
   { major: 18, version: [18, 20, 0] },
   { major: 20, version: [20, 19, 0] },
-  // v1.41 nixpkgs provides Node 22.12, which satisfies modern Vite's >=22.12.0
   { major: 22, version: [22, 12, 0] },
   { major: 24, version: [24, 0, 0] }
 ];
+
+// NIXPACKS_NODE_ARCHIVES: Nixpkgs archive hashes used by Nixpacks v1.41 for
+// each supported Node major. Derived from AVAILABLE_NODE_VERSIONS in the
+// Nixpacks source. When NIXPACKS_NODE_VERSION=<major> is set, Nixpacks selects
+// the corresponding archive and adds nodejs_<major> from it.
+//
+// CRITICAL: Custom nixPkgs in a project's nixpacks.toml are evaluated against
+// the DEFAULT archive (Node 18/20 archive). That archive does NOT contain
+// nodejs_24. Writing nodejs_24 to nixpacks.toml causes:
+//   error: undefined variable 'nodejs_24'
+//
+// The NIXPACKS_NODE_VERSION env var bypasses this by selecting the correct
+// per-version archive internally. Morline must NEVER write nodejs_XX to
+// nixpacks.toml as a runtime selection mechanism.
+const NIXPACKS_NODE_ARCHIVES = new Map([
+  [18, 'ffeebf0acf3ae8b29f8c7049cd911b9636efd7e7'],
+  [20, 'ffeebf0acf3ae8b29f8c7049cd911b9636efd7e7'],
+  [22, 'e6f23dc08d3624daab7094b701aa3954923c6bbb'],
+  [24, '23f9169c4ccce521379e602cc82ed873a1f1b52b']
+]);
+
+// Validate that SUPPORTED_NODE and NIXPACKS_NODE_ARCHIVES are in sync.
+// If a version is supported semantically but has no provisioning archive,
+// it should not be advertised (fail fast at startup, not mid-build).
+for (const { major } of SUPPORTED_NODE) {
+  if (!NIXPACKS_NODE_ARCHIVES.has(major)) {
+    throw new Error(
+      `CONFIGURATION ERROR: Node ${major} is listed in SUPPORTED_NODE but has no entry in NIXPACKS_NODE_ARCHIVES. ` +
+      `Add the nixpkgs archive hash from Nixpacks AVAILABLE_NODE_VERSIONS or remove the runtime from SUPPORTED_NODE.`
+    );
+  }
+}
 
 const read = (cwd, name) => { try { return fs.readFileSync(path.join(cwd, name), 'utf8').trim(); } catch { return null; } };
 const json = (cwd, name) => { try { return JSON.parse(read(cwd, name)); } catch { return null; } };
@@ -143,9 +200,19 @@ function resolveNode(cwd, override) {
     throw new Error(`No supported Node runtime satisfies ${requested}. Morline supports Node ${SUPPORTED_NODE.map((v) => v.major).join(', ')}.`);
   }
   const chosen = candidates.at(-1);
+  const nixpacksArchive = NIXPACKS_NODE_ARCHIVES.get(chosen.major);
+  if (!nixpacksArchive) {
+    // Guarded by the startup validation above, but defend in depth.
+    throw new Error(`Node ${chosen.major} has no Nixpacks provisioning archive. Update NIXPACKS_NODE_ARCHIVES.`);
+  }
   return {
     runtime: 'node',
     version: String(chosen.major),
+    // nixpacksArchive is the nixpkgs commit hash that Nixpacks uses when
+    // NIXPACKS_NODE_VERSION=<major> is set. This is NOT used to generate
+    // nixpacks.toml — it documents which provisioning archive will be selected
+    // so callers can validate toolchain compatibility before building.
+    nixpacksArchive,
     source: requirements.length ? requirements.map((r) => r.source).join(', ') : 'Morline default',
     requirements
   };
