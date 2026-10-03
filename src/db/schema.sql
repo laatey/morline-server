@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS service_settings (
   auto_deploy INTEGER NOT NULL DEFAULT 1,
   build_command TEXT,
   start_command TEXT,
+  runtime_version TEXT,
   dockerfile_path TEXT,
   healthcheck_path TEXT DEFAULT '/',
   healthcheck_timeout_sec INTEGER DEFAULT 30,

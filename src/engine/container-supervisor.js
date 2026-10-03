@@ -33,9 +33,9 @@ function prepareNixpacksDockerignore(cwd) {
   };
 }
 
-function run(command, args, { cwd, onLine, stderrLevel = 'error' } = {}) {
+function run(command, args, { cwd, env, onLine, stderrLevel = 'error' } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     const consume = (stream, level) => {
       let buffer = '';
@@ -53,6 +53,16 @@ function run(command, args, { cwd, onLine, stderrLevel = 'error' } = {}) {
     child.once('error', reject);
     child.once('close', (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command} exited with ${code}`)));
   });
+}
+
+function prepareNixpacksRuntime(cwd, runtime) {
+  if (!runtime?.version || runtime.runtime !== 'node') return () => {};
+  const file = path.join(cwd, 'nixpacks.toml');
+  if (!fs.existsSync(file)) return () => {};
+  const original = fs.readFileSync(file, 'utf8');
+  const updated = original.replace(/nodejs_\d+/g, `nodejs_${runtime.version}`);
+  if (updated !== original) fs.writeFileSync(file, updated);
+  return () => { if (updated !== original) fs.writeFileSync(file, original); };
 }
 
 export class ContainerSupervisor {
@@ -74,7 +84,7 @@ export class ContainerSupervisor {
     return info ? this.endpoint(serviceId, info.port) : null;
   }
 
-  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, installCommand, startCommand, onLog }) {
+  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, installCommand, startCommand, runtime, onLog }) {
     const image = imageName(serviceId, deploymentId);
     const log = (level, line) => onLog?.(level, line);
     if (strategy === 'dockerfile') {
@@ -86,14 +96,17 @@ export class ContainerSupervisor {
       // A workspace can retain ignored local dependencies after an earlier build.
       // Never copy those host-specific binaries into an OCI image.
       const restoreIgnore = prepareNixpacksDockerignore(cwd);
+      const restoreRuntime = prepareNixpacksRuntime(cwd, runtime);
       try {
         const args = ['build', cwd, '--name', image];
         if (installCommand) args.push('--install-cmd', installCommand);
         // Settings is the one source of truth for an explicit start command.
         // Nixpacks' own config remains in effect when the field is blank.
         if (startCommand) args.push('--start-cmd', startCommand);
-        await run('nixpacks', args, { cwd, onLine: log, stderrLevel: 'info' });
+        const env = runtime?.runtime === 'node' && runtime.version ? { NODE_VERSION: runtime.version } : undefined;
+        await run('nixpacks', args, { cwd, env, onLine: log, stderrLevel: 'info' });
       } finally {
+        restoreRuntime();
         restoreIgnore();
       }
     }

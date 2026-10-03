@@ -206,6 +206,7 @@ export function mapServiceDetail(service, settings, topology) {
       autoDeploy: true,
       buildCommand: null,
       startCommand: null,
+      runtimeVersion: null,
       dockerfilePath: null,
       healthcheckPath: '/',
       healthcheckTimeoutSec: 30,

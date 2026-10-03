@@ -13,6 +13,7 @@ import {
   readJsonSafe,
   STATIC_SERVER_SOURCE
 } from './project-detector.js';
+import { resolveRuntime } from './runtime-resolver.js';
 
 const { queryOne, execute } = dbModule;
 
@@ -80,21 +81,8 @@ function hasNixpacksInstallCommand(cwd) {
 
 function npmNixpacksInstallCommand(cwd) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((name) => fs.existsSync(path.join(cwd, name)));
-  // Rolldown is used by current Vite releases. Its platform bindings are npm
-  // optional dependencies, which npm can omit even after resolving on Linux.
-  // Install the exact binding version after dependencies are present. Nixpacks
-  // builds on Morline's x86_64 Ubuntu image, so this is the matching target.
-  const ensureRolldownBinding = `if [ -f node_modules/rolldown/package.json ]; then rolldown_version=$(node -p "require('./node_modules/rolldown/package.json').version"); npm install --no-save --no-package-lock --include=optional --no-audit --no-fund "@rolldown/binding-linux-x64-gnu@$rolldown_version"; fi`;
-  const install = `npm install --include=dev --include=optional --no-audit --no-fund && ${ensureRolldownBinding}`;
-  if (!hasLock) return install;
-
-  // A lockfile created on another OS can omit a platform-specific optional
-  // package (for example a Linux native binding for Vite/Rolldown). npm does
-  // not repair that lockfile merely with --package-lock-only. Recreate it in
-  // the Linux build container, then use npm ci for the actual installation.
-  // The workspace is an isolated checkout, so neither command changes the
-  // user's repository.
-  return `rm -rf node_modules package-lock.json npm-shrinkwrap.json && npm install --package-lock-only --ignore-scripts --include=dev --include=optional --no-audit --no-fund && npm ci --include=dev --include=optional --no-audit --no-fund && ${ensureRolldownBinding}`;
+  // Preserve a project lockfile. It is the reproducible dependency contract.
+  return hasLock ? 'npm ci --include=dev --include=optional --no-audit --no-fund' : 'npm install --include=dev --include=optional --no-audit --no-fund';
 }
 
 class BuildManager {
@@ -257,6 +245,12 @@ server.listen(port, '0.0.0.0', () => {
       ctx.log('info', '[Build] npm install will include optional native packages for the Linux build platform');
     }
 
+    let runtime = null;
+    if (buildStrategy === 'nixpacks') {
+      runtime = resolveRuntime(workDir, { override: (currentSettings.runtime_version || '').trim() });
+      if (runtime?.version) ctx.log('info', `[Detect] Resolved ${runtime.runtime} ${runtime.version} from ${runtime.source}`);
+    }
+
     ctx.log('info',
       `[Detect] ${detected.language}${detected.framework ? `/${detected.framework}` : ''}` +
       `${detected.packageManager ? ` (${detected.packageManager})` : ''}`);
@@ -281,6 +275,7 @@ server.listen(port, '0.0.0.0', () => {
         dockerfilePath,
         installCommand: nixpacksInstallCommand,
         startCommand: customStart,
+        runtime,
         onLog: (level, message) => ctx.log(level, `[Container build] ${message}`)
       });
       execute('UPDATE deployments SET image = ? WHERE id = ?', image, deploymentId);

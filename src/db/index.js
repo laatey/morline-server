@@ -135,6 +135,9 @@ function applyMigrations(db) {
   if (!settingsCols.includes('base_path')) {
     db.exec('ALTER TABLE service_settings ADD COLUMN base_path TEXT;');
   }
+  if (!settingsCols.includes('runtime_version')) {
+    db.exec('ALTER TABLE service_settings ADD COLUMN runtime_version TEXT;');
+  }
 }
 
 function clean(params) {

@@ -64,6 +64,7 @@ function getServiceDetail(service) {
     autoDeploy: Boolean(settings.auto_deploy),
     buildCommand: settings.build_command || null,
     startCommand: settings.start_command || 'node server.js',
+    runtimeVersion: settings.runtime_version || null,
     dockerfilePath: settings.dockerfile_path || null,
     healthcheckPath: settings.healthcheck_path || '/',
     healthcheckTimeoutSec: Number(settings.healthcheck_timeout_sec || 30),
@@ -126,6 +127,7 @@ router.patch('/services/:serviceId', (req, res, next) => {
       if (settings.autoDeploy !== undefined) { sUpdates.push('auto_deploy = ?'); sParams.push(settings.autoDeploy ? 1 : 0); }
       if (settings.buildCommand !== undefined) { sUpdates.push('build_command = ?'); sParams.push(settings.buildCommand); }
       if (settings.startCommand !== undefined) { sUpdates.push('start_command = ?'); sParams.push(settings.startCommand); }
+      if (settings.runtimeVersion !== undefined) { sUpdates.push('runtime_version = ?'); sParams.push(settings.runtimeVersion); }
       if (settings.dockerfilePath !== undefined) { sUpdates.push('dockerfile_path = ?'); sParams.push(settings.dockerfilePath); }
       if (settings.healthcheckPath !== undefined) { sUpdates.push('healthcheck_path = ?'); sParams.push(settings.healthcheckPath); }
       if (settings.healthcheckTimeoutSec !== undefined) { sUpdates.push('healthcheck_timeout_sec = ?'); sParams.push(settings.healthcheckTimeoutSec); }
