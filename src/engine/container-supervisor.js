@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
@@ -107,13 +108,24 @@ export class ContainerSupervisor {
           { cwd, env: cfg, onLine: log, stderrLevel: 'info' });
 
         log('info', `[Railpack] Building with ${RAILPACK_FRONTEND}`);
+        // Everything passed to `prepare --env` becomes a BuildKit *secret* referenced
+        // by the plan, so each one must be supplied again here (values come from the
+        // process env, never the command line) plus a hash so BuildKit invalidates
+        // cached layers when a value changes.
+        const secretKeys = Object.keys(cfg).sort();
+        const secretsHash = crypto.createHash('sha256')
+          .update(secretKeys.map((k) => `${k}=${cfg[k]}`).join('\n')).digest('hex');
+        const secretArgs = secretKeys.flatMap((k) => ['--secret', `id=${k},env=${k}`]);
+
         await run('docker', [
           'buildx', 'build',
           '--build-arg', `BUILDKIT_SYNTAX=${RAILPACK_FRONTEND}`,
+          '--build-arg', `secrets-hash=${secretsHash}`,
+          ...secretArgs,
           '-f', planFile,
           '--load', '--tag', image,
           cwd
-        ], { cwd, env: { DOCKER_BUILDKIT: '1' }, onLine: log, stderrLevel: 'info' });
+        ], { cwd, env: { DOCKER_BUILDKIT: '1', ...cfg }, onLine: log, stderrLevel: 'info' });
 
         // Post-build sanity check: what actually ended up in the image.
         if (runtime?.runtime === 'node') {
