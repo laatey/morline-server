@@ -58,11 +58,34 @@ function run(command, args, { cwd, env, onLine, stderrLevel = 'error' } = {}) {
 function prepareNixpacksRuntime(cwd, runtime) {
   if (!runtime?.version || runtime.runtime !== 'node') return () => {};
   const file = path.join(cwd, 'nixpacks.toml');
-  if (!fs.existsSync(file)) return () => {};
-  const original = fs.readFileSync(file, 'utf8');
-  const updated = original.replace(/nodejs_\d+/g, `nodejs_${runtime.version}`);
-  if (updated !== original) fs.writeFileSync(file, updated);
-  return () => { if (updated !== original) fs.writeFileSync(file, original); };
+  const existed = fs.existsSync(file);
+  const original = existed ? fs.readFileSync(file, 'utf8') : null;
+
+  if (!existed) {
+    // No nixpacks.toml in the project — create a minimal one that pins the
+    // resolved Node major so Nixpacks does not fall back to its own default.
+    fs.writeFileSync(file, `[phases.setup]\nnixPkgs = ["nodejs_${runtime.version}"]\n`);
+    return () => fs.rmSync(file, { force: true });
+  }
+
+  // File exists — replace any nodejs_XX[_x] tokens with the resolved major.
+  // If the file has no such token, inject the package into the first nixPkgs
+  // array found in [phases.setup], or append a new [phases.setup] section.
+  let updated = original.replace(/nodejs[_-]\d+(_x)?/g, `nodejs_${runtime.version}`);
+  if (updated === original) {
+    // No existing nodejs token: inject into an existing nixPkgs array if present.
+    const injected = original.replace(
+      /(\[phases\.setup\][^\[]*nixPkgs\s*=\s*\[)([^\]]*)(\])/,
+      (_, open, inner, close) => {
+        const sep = inner.trim() ? ', ' : '';
+        return `${open}${inner}${sep}"nodejs_${runtime.version}"${close}`;
+      }
+    );
+    updated = injected !== original ? injected
+      : `${original.trimEnd()}\n\n[phases.setup]\nnixPkgs = ["nodejs_${runtime.version}"]\n`;
+  }
+  fs.writeFileSync(file, updated);
+  return () => fs.writeFileSync(file, original);
 }
 
 export class ContainerSupervisor {
@@ -103,7 +126,10 @@ export class ContainerSupervisor {
         // Settings is the one source of truth for an explicit start command.
         // Nixpacks' own config remains in effect when the field is blank.
         if (startCommand) args.push('--start-cmd', startCommand);
-        const env = runtime?.runtime === 'node' && runtime.version ? { NODE_VERSION: runtime.version } : undefined;
+        // NIXPACKS_NODE_VERSION is the documented Nixpacks env var for selecting
+        // the Node major. NODE_VERSION is a runtime variable inside the container
+        // and has no effect on build-time package selection.
+        const env = runtime?.runtime === 'node' && runtime.version ? { NIXPACKS_NODE_VERSION: runtime.version } : undefined;
         await run('nixpacks', args, { cwd, env, onLine: log, stderrLevel: 'info' });
       } finally {
         restoreRuntime();
