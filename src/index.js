@@ -38,6 +38,13 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
+// Reverse proxy for deployed user services. This MUST run before the API's CORS
+// allow-list: that list is for Morline's own API. Browsers attach an Origin header to
+// <script type="module" crossorigin> requests (every Vite bundle), and the CORS
+// middleware turned those into 500s before they ever reached the user's container.
+// The proxy calls next() for API/base-domain hosts, so the API is still protected.
+app.use(reverseProxyMiddleware);
+
 // Only permit configured browser origins to make credentialed API calls.
 app.use(cors({
   origin(origin, callback) {
@@ -51,9 +58,6 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept']
 }));
-
-// Reverse proxy middleware for requests to internal service ports
-app.use(reverseProxyMiddleware);
 
 // Middleware
 app.use(requestIdMiddleware);
