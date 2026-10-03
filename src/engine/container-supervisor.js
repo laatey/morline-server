@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import { parseDocument } from 'yaml';
 import { APPS_DIR, DATA_DIR } from '../config.js';
 import { execute, queryAll, queryOne } from '../db/index.js';
@@ -321,6 +322,28 @@ export class ContainerSupervisor {
     });
   }
 
+  tcpOpen(host, port, timeoutMs = 1500) {
+    return new Promise((resolve) => {
+      const socket = net.connect({ host, port });
+      const done = (ok) => { socket.destroy(); resolve(ok); };
+      socket.setTimeout(timeoutMs, () => done(false));
+      socket.once('connect', () => done(true));
+      socket.once('error', () => done(false));
+    });
+  }
+
+  // Ports the image declares with EXPOSE (e.g. 5432 for Postgres images).
+  async exposedPorts(image) {
+    if (!image) return [];
+    try {
+      let out = '';
+      await run('docker', ['image', 'inspect', '-f', '{{json .Config.ExposedPorts}}', image], { onLine: (_, line) => { out += line; } });
+      return Object.keys(JSON.parse(out.trim() || 'null') || {}).map((k) => parseInt(k, 10)).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
   async containerState(name) {
     try {
       let out = '';
@@ -366,6 +389,18 @@ export class ContainerSupervisor {
       if (lastStatus) {
         return this.markHealthy(serviceId, deploymentId,
           `Healthcheck ${healthPath} kept returning ${lastStatus}; marked online because the port is serving traffic`, 'warn');
+      }
+      // The configured port may simply be wrong (it defaults to 3000 for every service).
+      // If the image declares a port that is accepting connections, use that instead of
+      // failing a service that is actually running fine.
+      for (const port of await this.exposedPorts(info.image)) {
+        if (port === endpoint.port || !(await this.tcpOpen(endpoint.host, port))) continue;
+        if (!current()) return;
+        execute('UPDATE service_networking SET target_port = ? WHERE service_id = ?', port, serviceId);
+        execute('UPDATE services SET port = ? WHERE id = ?', port, serviceId);
+        info.port = port;
+        return this.markHealthy(serviceId, deploymentId,
+          `Nothing answered on port ${endpoint.port}, but the image exposes port ${port} and it is accepting connections. Target port updated to ${port}.`, 'warn');
       }
       this.markFailed(serviceId, deploymentId,
         `Nothing started listening on port ${endpoint.port} within ${seconds}s. Make sure the app listens on 0.0.0.0 and uses the PORT env var, or set the target port in Settings.`);
