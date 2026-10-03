@@ -15,6 +15,50 @@ const safeName = (value) => String(value).toLowerCase().replace(/[^a-z0-9_.-]/g,
 const containerName = (serviceId) => `morline-${safeName(serviceId)}`;
 const imageName = (serviceId, deploymentId) => `morline/${safeName(serviceId)}:${safeName(deploymentId)}`;
 
+
+// Docker only tells us which *stream* a line came from, and plenty of healthy programs
+// (uvicorn, postgres, python logging, npm) write ordinary INFO output to stderr. Labelling
+// by stream made normal startup output show up as errors. Classify by content instead.
+const TAG = '(^|[\\s\\[(|:])';
+const END = '(\\b|:|\\])';
+const RE_ERROR = new RegExp(`${TAG}(ERROR|FATAL|CRITICAL|PANIC|SEVERE)${END}`);
+const RE_WARN = new RegExp(`${TAG}(WARN|WARNING)${END}`);
+const RE_INFO = new RegExp(`${TAG}(INFO|DEBUG|LOG|NOTICE|TRACE)${END}`);
+
+function detectLevel(line) {
+  const t = line.trim();
+  if (t.startsWith('{')) {
+    try {
+      const j = JSON.parse(t);
+      const l = String(j.level ?? j.severity ?? j.lvl ?? '').toLowerCase();
+      if (l) {
+        if (/^(err|fatal|panic|crit|dpanic|alert|emerg)/.test(l)) return 'error';
+        if (l.startsWith('warn')) return 'warn';
+        return 'info';
+      }
+    } catch { /* not JSON, fall through */ }
+  }
+  if (/^\s*(\w+: )?(error|fatal|panic)\b[:\s]/i.test(t) || /Traceback \(most recent call last\)/.test(t)
+    || /\b(Unhandled|Uncaught)\b/.test(t) || /^\w*Error: /.test(t) || /\bnpm ERR!/.test(t)
+    || RE_ERROR.test(t)) return 'error';
+  if (/^\s*(\w+: )?warning:/i.test(t) || /\bnpm warn\b/.test(t) || RE_WARN.test(t)) return 'warn';
+  if (RE_INFO.test(t)) return 'info';
+  return null;
+}
+
+// Per-stream classifier. Unrecognised lines that follow an error/warning within a moment
+// (stack traces, multi-line messages) inherit its level; everything else is plain info.
+function makeLevelClassifier() {
+  let last = { level: 'info', at: 0 };
+  return (line) => {
+    const now = Date.now();
+    let level = detectLevel(line);
+    if (!level) level = last.level !== 'info' && now - last.at < 250 ? last.level : 'info';
+    last = { level, at: now };
+    return level;
+  };
+}
+
 function hostWorkspacePath(cwd) {
   const hostData = process.env.HOST_DATA_DIR;
   if (!hostData || !cwd.startsWith(DATA_DIR + path.sep)) return cwd;
@@ -246,42 +290,115 @@ export class ContainerSupervisor {
   followLogs(service, info) {
     const child = spawn('docker', ['logs', '--follow', '--tail', '0', info.name], { stdio: ['ignore', 'pipe', 'pipe'] });
     info.logChild = child;
-    const capture = (stream, level) => {
+    const capture = (stream) => {
+      const classify = makeLevelClassifier();
       let buffer = '';
       stream.on('data', (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split(/\r?\n/); buffer = lines.pop();
-        for (const message of lines.filter(Boolean)) this.log(service, info, level, message);
+        for (const message of lines.filter(Boolean)) this.log(service, info, classify(message), message);
       });
     };
-    capture(child.stdout, 'info'); capture(child.stderr, 'error');
+    capture(child.stdout); capture(child.stderr);
   }
 
   log(service, info, level, message) {
     logManager.appendLog({ deploymentId: info.deploymentId, serviceId: service.id, serviceName: service.name, environmentId: service.environment_id, level, message });
   }
 
-  pollHealthCheck(serviceId, deploymentId, endpoint, healthPath, timeoutSec) {
-    const deadline = Date.now() + Number(timeoutSec) * 1000;
-    const check = () => {
-      const info = this.processes.get(serviceId);
-      if (!info) return;
+  // 'http' = answered HTTP, 'tcp' = port open but not speaking HTTP (databases etc.), 'down' = nothing there.
+  probe(endpoint, healthPath) {
+    return new Promise((resolve) => {
       const req = http.get({ host: endpoint.host, port: endpoint.port, path: healthPath, timeout: 1500 }, (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 500) return this.markHealthy(serviceId, deploymentId);
-        if (Date.now() < deadline) setTimeout(check, 800);
+        res.resume();
+        resolve({ state: 'http', status: res.statusCode });
       });
-      req.on('error', () => Date.now() < deadline && setTimeout(check, 800));
-      req.on('timeout', () => req.destroy());
+      req.on('timeout', () => { req.destroy(); resolve({ state: 'down' }); });
+      req.on('error', (err) => resolve(
+        ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'ETIMEDOUT'].includes(err.code)
+          ? { state: 'down' } : { state: 'tcp' }
+      ));
+    });
+  }
+
+  async containerState(name) {
+    try {
+      let out = '';
+      await run('docker', ['inspect', '-f', '{{.State.Status}}|{{.State.ExitCode}}', name], { onLine: (_, line) => { out += line; } });
+      const [status, exitCode] = out.trim().split('|');
+      return { status, exitCode };
+    } catch {
+      return null;
+    }
+  }
+
+  // Every deployment that reaches 'deploying' now ends in 'active' or 'failed'. It can no
+  // longer sit there silently when the app is non-HTTP, slow, or never listens.
+  pollHealthCheck(serviceId, deploymentId, endpoint, healthPath, timeoutSec) {
+    const seconds = Math.max(Number(timeoutSec) || 30, 30);
+    const deadline = Date.now() + seconds * 1000;
+    let lastStatus = null;
+    // A newer deployment of the same service cancels this loop.
+    const current = () => {
+      const info = this.processes.get(serviceId);
+      return info && info.deploymentId === deploymentId ? info : null;
+    };
+    const check = async () => {
+      const info = current();
+      if (!info) return;
+      if (info.kind !== 'compose') {
+        const state = await this.containerState(info.name);
+        if (!current()) return;
+        if (state && (state.status === 'exited' || state.status === 'dead')) {
+          return this.markFailed(serviceId, deploymentId, `Container exited with code ${state.exitCode} before becoming healthy. Check the logs above for the cause.`);
+        }
+      }
+      const result = await this.probe(endpoint, healthPath);
+      if (!current()) return;
+      if (result.state === 'tcp') {
+        return this.markHealthy(serviceId, deploymentId, `Port ${endpoint.port} is accepting connections (non-HTTP service)`);
+      }
+      if (result.state === 'http') {
+        if (result.status < 500) return this.markHealthy(serviceId, deploymentId);
+        lastStatus = result.status;
+      }
+      if (Date.now() < deadline) return void setTimeout(check, 800);
+      if (lastStatus) {
+        return this.markHealthy(serviceId, deploymentId,
+          `Healthcheck ${healthPath} kept returning ${lastStatus}; marked online because the port is serving traffic`, 'warn');
+      }
+      this.markFailed(serviceId, deploymentId,
+        `Nothing started listening on port ${endpoint.port} within ${seconds}s. Make sure the app listens on 0.0.0.0 and uses the PORT env var, or set the target port in Settings.`);
     };
     setTimeout(check, 500);
   }
 
-  markHealthy(serviceId, deploymentId) {
+  markHealthy(serviceId, deploymentId, note = null, level = 'info') {
     const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
-    if (!service) return;
+    const deployment = queryOne('SELECT state FROM deployments WHERE id = ?', deploymentId);
+    if (!service || !deployment || !['deploying', 'active'].includes(deployment.state)) return;
+    const at = new Date().toISOString();
     execute('UPDATE services SET status = ?, active_deployment_id = ?, building_deployment_id = NULL WHERE id = ?', 'online', deploymentId, serviceId);
-    execute('UPDATE deployments SET state = ?, finished_at = ? WHERE id = ?', 'active', new Date().toISOString(), deploymentId);
-    eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at: new Date().toISOString(), actorId: null, canvasRevision: null, data: { id: serviceId, status: 'online' } });
+    execute('UPDATE deployments SET state = ?, finished_at = ? WHERE id = ?', 'active', at, deploymentId);
+    const info = this.processes.get(serviceId);
+    if (note && info) this.log(service, info, level, `[Deploy] ${note}`);
+    // The UI tracks deployment progress from deployment.updated events. Emitting only
+    // service.status left the deployment card on "deploying" until a manual refresh.
+    eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: deploymentId, state: 'active' } });
+    eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at, actorId: null, canvasRevision: null, data: { id: serviceId, status: 'online' } });
+  }
+
+  markFailed(serviceId, deploymentId, summary) {
+    const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
+    const deployment = queryOne('SELECT state FROM deployments WHERE id = ?', deploymentId);
+    if (!service || !deployment || deployment.state !== 'deploying') return;
+    const at = new Date().toISOString();
+    execute('UPDATE deployments SET state = ?, finished_at = ?, error_summary = ? WHERE id = ?', 'failed', at, summary, deploymentId);
+    execute('UPDATE services SET status = ?, building_deployment_id = NULL WHERE id = ?', 'crashed', serviceId);
+    const info = this.processes.get(serviceId);
+    if (info) this.log(service, info, 'error', `[Deploy] ${summary}`);
+    eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: deploymentId, state: 'failed', errorSummary: summary } });
+    eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at, actorId: null, canvasRevision: null, data: { id: serviceId, status: 'crashed' } });
   }
 
   async stopService(serviceId, releasePort = true) {
