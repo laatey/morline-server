@@ -65,23 +65,14 @@ function baseEnv() {
   };
 }
 
-function hasNixpacksInstallCommand(cwd) {
-  const json = readJsonSafe(cwd, 'nixpacks.json');
-  const install = json?.phases?.install;
-  if (install && (typeof install.cmd === 'string' || Array.isArray(install.cmds))) return true;
-
-  try {
-    const toml = fs.readFileSync(path.join(cwd, 'nixpacks.toml'), 'utf8');
-    const section = toml.match(/^\s*\[phases\.install\]\s*\r?\n([\s\S]*?)(?=^\s*\[|\s*$)/m)?.[1] || '';
-    return /^\s*(?:cmd|cmds)\s*=/m.test(section);
-  } catch {
-    return false;
-  }
+function hasRailpackInstallCommand(cwd) {
+  const json = readJsonSafe(cwd, 'railpack.json');
+  return Boolean(json?.steps?.install?.commands);
 }
 
-function npmNixpacksInstallCommand(cwd) {
+function npmInstallCommand(cwd) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((name) => fs.existsSync(path.join(cwd, name)));
-  // `npm install` (not `npm ci`) is intentional for the Nixpacks build phase.
+  // `npm install` (not `npm ci`) is intentional for the Railpack install step.
   //
   // `npm ci` uses the lockfile strictly: it only installs packages that are
   // already present in the lockfile. Cross-platform lockfiles (e.g. created
@@ -91,7 +82,7 @@ function npmNixpacksInstallCommand(cwd) {
   //
   // `npm install` with a lockfile present reads the lockfile for version
   // pinning but ALSO resolves optional platform-specific dependencies for the
-  // CURRENT platform (Linux x64 glibc in the Nixpacks container). This
+  // CURRENT platform (Linux x64 glibc in the build container). This
   // correctly installs native bindings regardless of where the lockfile was
   // originally generated.
   //
@@ -254,21 +245,22 @@ server.listen(port, '0.0.0.0', () => {
     const installCommand = userInstall || detected.install;
     const buildCommand = userBuild || detected.build;
     const dockerfilePath = (currentSettings.dockerfile_path || '').trim() || (fs.existsSync(path.join(workDir, 'Dockerfile')) ? 'Dockerfile' : '');
-    const hasNixpacks = ['nixpacks.toml', 'nixpacks.json'].some((name) => fs.existsSync(path.join(workDir, name)));
+    const hasLegacyNixpacks = ['nixpacks.toml', 'nixpacks.json'].some((name) => fs.existsSync(path.join(workDir, name)));
+    const hasRailpackConfig = fs.existsSync(path.join(workDir, 'railpack.json'));
     const composePath = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
       .find((name) => fs.existsSync(path.join(workDir, name))) || null;
-    const buildStrategy = composePath ? 'compose' : (dockerfilePath ? 'dockerfile' : 'nixpacks');
-    let nixpacksInstallCommand = userInstall || overrides.install || '';
+    const buildStrategy = composePath ? 'compose' : (dockerfilePath ? 'dockerfile' : 'railpack');
+    let railpackInstallCommand = userInstall || overrides.install || '';
     if (
-      buildStrategy === 'nixpacks' && detected.language === 'node' && detected.packageManager === 'npm' &&
-      !nixpacksInstallCommand && !hasNixpacksInstallCommand(workDir)
+      buildStrategy === 'railpack' && detected.language === 'node' && detected.packageManager === 'npm' &&
+      !railpackInstallCommand && !hasRailpackInstallCommand(workDir)
     ) {
-      nixpacksInstallCommand = npmNixpacksInstallCommand(workDir);
+      railpackInstallCommand = npmInstallCommand(workDir);
       ctx.log('info', '[Build] npm install will include optional native packages for the Linux build platform');
     }
 
     let runtime = null;
-    if (buildStrategy === 'nixpacks') {
+    if (buildStrategy === 'railpack') {
       runtime = resolveRuntime(workDir, { override: (currentSettings.runtime_version || '').trim() });
       if (runtime?.version) ctx.log('info', `[Detect] Resolved ${runtime.runtime} ${runtime.version} from ${runtime.source}`);
     }
@@ -278,8 +270,9 @@ server.listen(port, '0.0.0.0', () => {
       `${detected.packageManager ? ` (${detected.packageManager})` : ''}`);
 
     if (composePath) ctx.log('info', `[Detect] Found ${composePath}; deploying its Compose service stack`);
-    if (hasNixpacks) ctx.log('info', '[Detect] Found Nixpacks configuration; applying it to the image build');
-    ctx.log('info', `[Build] Container strategy: ${buildStrategy}${dockerfilePath ? ` (${dockerfilePath})` : ' (Nixpacks)'}`);
+    if (hasRailpackConfig) ctx.log('info', '[Detect] Found railpack.json; Railpack will apply it');
+    if (hasLegacyNixpacks && !hasRailpackConfig) ctx.log('warn', '[Detect] nixpacks.toml/json is ignored by Railpack; use railpack.json or Settings instead');
+    ctx.log('info', `[Build] Container strategy: ${buildStrategy}${dockerfilePath ? ` (${dockerfilePath})` : ' (Railpack)'}`);
 
     // 3. Legacy project detection runs only for source validation and explicit build
     // commands. Container builds own dependency installation and start processes.
@@ -289,13 +282,13 @@ server.listen(port, '0.0.0.0', () => {
     const env = { ...baseEnv(), ...detected.env, ...vars };
 
     // 4. Build an immutable OCI image. A Dockerfile is authoritative; otherwise
-    // Nixpacks creates an equivalent Docker image from source and nixpacks config.
+    // Railpack creates an equivalent Docker image from source and nixpacks config.
     if (buildStrategy !== 'compose') {
       const image = await containerSupervisor.build(serviceId, deploymentId, {
         cwd: workDir,
         strategy: buildStrategy,
         dockerfilePath,
-        installCommand: nixpacksInstallCommand,
+        installCommand: railpackInstallCommand,
         startCommand: customStart,
         runtime,
         onLog: (level, message) => ctx.log(level, `[Container build] ${message}`)

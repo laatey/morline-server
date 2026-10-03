@@ -1,7 +1,11 @@
 FROM node:22-bookworm-slim
 
+# CLI version and BuildKit frontend image MUST be the same version.
+ARG RAILPACK_VERSION=0.37.0
+
 ENV NODE_ENV=production \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    RAILPACK_VERSION=${RAILPACK_VERSION}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl gpg git python3 make g++ \
@@ -11,10 +15,10 @@ RUN apt-get update \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
-    && curl -fsSLo /tmp/nixpacks.tar.gz https://github.com/railwayapp/nixpacks/releases/download/v1.41.0/nixpacks-v1.41.0-x86_64-unknown-linux-musl.tar.gz \
-    && tar -xzf /tmp/nixpacks.tar.gz -C /usr/local/bin nixpacks \
-    && chmod 0755 /usr/local/bin/nixpacks \
-    && rm -f /tmp/nixpacks.tar.gz \
+    && curl -fsSLo /tmp/railpack.tar.gz "https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/railpack-v${RAILPACK_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    && tar -xzf /tmp/railpack.tar.gz -C /usr/local/bin railpack \
+    && chmod 0755 /usr/local/bin/railpack \
+    && rm -f /tmp/railpack.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
@@ -19,7 +20,7 @@ function hostWorkspacePath(cwd) {
   return path.join(hostData, path.relative(DATA_DIR, cwd));
 }
 
-function prepareNixpacksDockerignore(cwd) {
+function prepareBuildIgnore(cwd) {
   const file = path.join(cwd, '.dockerignore');
   const existed = fs.existsSync(file);
   const original = existed ? fs.readFileSync(file, 'utf8') : null;
@@ -55,48 +56,9 @@ function run(command, args, { cwd, env, onLine, stderrLevel = 'error' } = {}) {
   });
 }
 
-function prepareNixpacksRuntime(cwd, runtime) {
-  if (!runtime?.version || runtime.runtime !== 'node') return () => {};
-  const file = path.join(cwd, 'nixpacks.toml');
-
-  // ARCHITECTURAL CONTRACT — do NOT write nodejs_XX to nixpacks.toml.
-  //
-  // Nixpacks v1.41 maps each Node major to a DIFFERENT nixpkgs archive:
-  //   Node 18/20 → ffeebf0acf3ae8b29f8c7049cd911b9636efd7e7
-  //   Node 22    → e6f23dc08d3624daab7094b701aa3954923c6bbb
-  //   Node 24    → 23f9169c4ccce521379e602cc82ed873a1f1b52b
-  //
-  // Custom nixPkgs entries in nixpacks.toml are evaluated against the
-  // DEFAULT nixpkgs archive (Node 18/20 archive). That archive does NOT
-  // contain nodejs_24, nodejs_22_x, etc. Writing nodejs_24 there produces:
-  //   "error: undefined variable 'nodejs_24'"
-  //
-  // The correct mechanism is NIXPACKS_NODE_VERSION (passed as an env var to
-  // the nixpacks CLI). Nixpacks then selects the correct per-version archive
-  // and adds the right nodejs_XX package entirely internally.
-  //
-  // For projects whose nixpacks.toml already declares nodejs_XX:
-  //   Strip those tokens so Nixpacks' own Node selection takes over via
-  //   NIXPACKS_NODE_VERSION. All other nixPkgs entries are left intact.
-  //   The original file is restored after the build completes.
-  if (!fs.existsSync(file)) {
-    // No nixpacks.toml — NIXPACKS_NODE_VERSION env var alone is sufficient.
-    return () => {};
-  }
-
-  const original = fs.readFileSync(file, 'utf8');
-  // Strip nodejs_XX tokens from any nixPkgs array. Order matters:
-  //   1. Remove "nodejs_XX", (when nodejs is not the last entry)
-  //   2. Remove , "nodejs_XX"  (when nodejs is not the first entry)
-  //   3. Remove "nodejs_XX"    (isolated — only entry in the array)
-  let stripped = original
-    .replace(/"nodejs[_-]\d[^"]*"\s*,\s*/g, '')
-    .replace(/,\s*"nodejs[_-]\d[^"]*"/g, '')
-    .replace(/"nodejs[_-]\d[^"]*"/g, '');
-  if (stripped === original) return () => {};
-  fs.writeFileSync(file, stripped);
-  return () => fs.writeFileSync(file, original);
-}
+// Railpack CLI and its BuildKit frontend image must be the same version.
+const RAILPACK_FRONTEND = process.env.RAILPACK_FRONTEND_IMAGE
+  || `ghcr.io/railwayapp/railpack-frontend:v${process.env.RAILPACK_VERSION || '0.37.0'}`;
 
 export class ContainerSupervisor {
   constructor() {
@@ -124,43 +86,47 @@ export class ContainerSupervisor {
       const file = dockerfilePath || 'Dockerfile';
       await run('docker', ['build', '--pull', '--tag', image, '--file', file, '.'], { cwd, onLine: log, stderrLevel: 'info' });
     } else {
-      // The Nixpacks build image is a base image for generated Dockerfiles, not the
-      // Nixpacks CLI. Run the packaged CLI directly against the mounted Docker daemon.
-      // A workspace can retain ignored local dependencies after an earlier build.
-      // Never copy those host-specific binaries into an OCI image.
-      const restoreIgnore = prepareNixpacksDockerignore(cwd);
-      const restoreRuntime = prepareNixpacksRuntime(cwd, runtime);
+      // Railpack: `prepare` analyses the source and writes a build plan, then the
+      // Railpack BuildKit frontend builds that plan through the mounted Docker daemon.
+      // (This is the production path recommended in the Railpack docs.)
+      const restoreIgnore = prepareBuildIgnore(cwd);
+      const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'railpack-'));
       try {
-        const args = ['build', cwd, '--name', image];
-        if (installCommand) args.push('--install-cmd', installCommand);
-        // Settings is the one source of truth for an explicit start command.
-        // Nixpacks' own config remains in effect when the field is blank.
-        if (startCommand) args.push('--start-cmd', startCommand);
-        // NIXPACKS_NODE_VERSION is the documented Nixpacks env var for selecting
-        // the Node major. NODE_VERSION is a runtime variable inside the container
-        // and has no effect on build-time package selection.
-        const env = runtime?.runtime === 'node' && runtime.version ? { NIXPACKS_NODE_VERSION: runtime.version } : undefined;
-        await run('nixpacks', args, { cwd, env, onLine: log, stderrLevel: 'info' });
+        const planFile = path.join(planDir, 'railpack-plan.json');
+        const infoFile = path.join(planDir, 'railpack-info.json');
 
-        // Post-build verification: log actual Node version and platform inside
-        // the built image. This confirms that NIXPACKS_NODE_VERSION propagated
-        // correctly through the build toolchain. Uses a transient container that
-        // is removed immediately after the check.
+        // Settings is the one source of truth. Blank fields => Railpack auto-detects.
+        const cfg = {};
+        if (installCommand) cfg.RAILPACK_INSTALL_CMD = installCommand;
+        if (startCommand) cfg.RAILPACK_START_CMD = startCommand;
+        if (runtime?.runtime === 'node' && runtime.version) cfg.RAILPACK_NODE_VERSION = String(runtime.version);
+        const envArgs = Object.entries(cfg).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+
+        log('info', `[Railpack] Planning build${Object.keys(cfg).length ? ` (${Object.keys(cfg).join(', ')})` : ''}`);
+        await run('railpack', ['prepare', cwd, '--plan-out', planFile, '--info-out', infoFile, ...envArgs],
+          { cwd, env: cfg, onLine: log, stderrLevel: 'info' });
+
+        log('info', `[Railpack] Building with ${RAILPACK_FRONTEND}`);
+        await run('docker', [
+          'buildx', 'build',
+          '--build-arg', `BUILDKIT_SYNTAX=${RAILPACK_FRONTEND}`,
+          '-f', planFile,
+          '--load', '--tag', image,
+          cwd
+        ], { cwd, env: { DOCKER_BUILDKIT: '1' }, onLine: log, stderrLevel: 'info' });
+
+        // Post-build sanity check: what actually ended up in the image.
         if (runtime?.runtime === 'node') {
           try {
-            const verifyScript = [
-              `node --version`,
-              `npm --version`,
-              `node -p "process.platform + '/' + process.arch"`,
-            ].join(' && ');
-            const verifyArgs = ['run', '--rm', '--entrypoint', 'sh', image, '-c', verifyScript];
-            await run('docker', verifyArgs, { onLine: (_, line) => log('info', `[Container verify] ${line}`) });
+            const verifyScript = ['node --version', 'npm --version', `node -p "process.platform + '/' + process.arch"`].join(' && ');
+            await run('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-c', verifyScript],
+              { onLine: (_, line) => log('info', `[Container verify] ${line}`) });
           } catch {
-            // Non-fatal: some minimal images may not have sh in the default PATH
+            // Non-fatal: minimal images may not have sh on PATH
           }
         }
       } finally {
-        restoreRuntime();
+        fs.rmSync(planDir, { recursive: true, force: true });
         restoreIgnore();
       }
     }
