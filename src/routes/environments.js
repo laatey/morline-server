@@ -1,3 +1,5 @@
+import { resolveGithubSource } from '../services/github-url.js';
+import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
@@ -242,10 +244,13 @@ router.post('/:environmentId/services', async (req, res, next) => {
     const posX = position?.x || 100;
     const posY = position?.y || 100;
     const sourceType = source?.type || (templateId ? 'template' : 'template');
-    const sourceRepo = source?.repo || (source?.url ? source.url.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '') : null);
-    const sourceUrl = source?.url || null;  // explicit public URL → anonymous clone
-    const sourceBranch = source?.branch || 'main';
-    const sourceRootDir = source?.rootDirectory || null;
+    // A pasted GitHub URL (optionally .../tree/<branch>/<folder>) is cloned anonymously.
+    const fromUrl = await resolveGithubSource(source?.url || source?.repo);
+    const sourceRepo = fromUrl?.repo || source?.repo || null;
+    const sourceUrl = source?.url || null;
+    // No branch unless one was asked for; the build then uses the repository's default branch.
+    const sourceBranch = (source?.branch || fromUrl?.branch || '').trim() || null;
+    const sourceRootDir = source?.rootDirectory || fromUrl?.rootDirectory || null;
     const sourceImage = source?.image || null;
     const sourceTemplateId = templateId || source?.templateId || null;
     const sourceDisplay = source?.display || serviceName;
@@ -272,7 +277,7 @@ router.post('/:environmentId/services', async (req, res, next) => {
       execute(`
         INSERT INTO service_settings (service_id, branch, root_directory, auto_deploy, build_command, start_command, healthcheck_path, healthcheck_timeout_sec, restart_policy, replicas)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, serviceId, settings?.branch || sourceBranch, settings?.rootDirectory || null,
+      `, serviceId, settings?.branch || sourceBranch, settings?.rootDirectory || sourceRootDir,
         settings?.autoDeploy ?? 1, settings?.buildCommand || null, settings?.startCommand || 'node server.js',
         settings?.healthcheckPath || '/', settings?.healthcheckTimeoutSec || 30, settings?.restartPolicy || 'on-failure', settings?.replicas || 1);
 
@@ -290,6 +295,10 @@ router.post('/:environmentId/services', async (req, res, next) => {
           `, `var_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`, serviceId, v.key, v.value, v.secret ? 1 : 0, now, now);
         }
       }
+
+      // Template services deploy from their folder in the templates repository. This runs after
+      // the request's own variables are stored, so anything the caller set wins over defaults.
+      if (!sourceUrl && hasTemplate(sourceTemplateId)) provisionTemplate(serviceId, sourceTemplateId, now);
     });
 
     const srvRow = queryOne('SELECT * FROM services WHERE id = ?', serviceId);

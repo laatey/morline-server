@@ -12,6 +12,7 @@ import { eventBus } from '../engine/event-bus.js';
 import { reviveFromStop } from '../engine/service-lifecycle.js';
 import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
+import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore } from '../engine/database-manager.js';
 import { APPS_DIR } from '../config.js';
 import { AppError } from '../middleware/error-handler.js';
 import { BASE_DOMAIN } from '../config.js';
@@ -897,58 +898,41 @@ router.delete('/volumes/:volumeId', (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /services/:serviceId/database/collections
-router.get('/services/:serviceId/database/collections', (req, res) => {
-  getService(req.params.serviceId); // 404 if not found
-  return res.json({ data: [] });
+router.get('/services/:serviceId/database/collections', async (req, res, next) => {
+  try {
+    return res.json({ data: await listCollections(getService(req.params.serviceId)) });
+  } catch (err) { next(err); }
 });
-
-// GET /services/:serviceId/database/collections/:name
-router.get('/services/:serviceId/database/collections/:name', (req, res) => {
-  getService(req.params.serviceId);
-  return res.json({ data: [] });
+// GET /services/:serviceId/database/collections/:name?limit=50&offset=0
+router.get('/services/:serviceId/database/collections/:name', async (req, res, next) => {
+  try {
+    const rows = await readRows(getService(req.params.serviceId), req.params.name, { limit: req.query.limit, offset: req.query.offset });
+    return res.json({ data: rows });
+  } catch (err) { next(err); }
 });
-
 // GET /services/:serviceId/database/connection
-router.get('/services/:serviceId/database/connection', (req, res) => {
-  getService(req.params.serviceId);
-  return res.json({
-    host: null,
-    port: null,
-    user: null,
-    password: null,
-    database: null,
-    url: null,
-    publicUrl: null
-  });
+router.get('/services/:serviceId/database/connection', (req, res, next) => {
+  try {
+    return res.json(connectionInfo(getService(req.params.serviceId)));
+  } catch (err) { next(err); }
 });
-
-// ---------------------------------------------------------------------------
-// Backup stubs (not implemented — return zero values)
-// ---------------------------------------------------------------------------
-
 // GET /services/:serviceId/backups
-router.get('/services/:serviceId/backups', (req, res) => {
-  getService(req.params.serviceId);
-  return res.json({ data: [] });
+router.get('/services/:serviceId/backups', (req, res, next) => {
+  try {
+    return res.json({ data: listBackups(getService(req.params.serviceId)) });
+  } catch (err) { next(err); }
 });
-
 // POST /services/:serviceId/backups
-router.post('/services/:serviceId/backups', (req, res) => {
-  getService(req.params.serviceId);
-  const id = `bkp_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-  return res.status(202).json({
-    id,
-    createdAt: new Date().toISOString(),
-    size: null,
-    status: 'pending',
-    kind: 'manual'
-  });
+router.post('/services/:serviceId/backups', async (req, res, next) => {
+  try {
+    return res.status(202).json(await startBackup(getService(req.params.serviceId), 'manual'));
+  } catch (err) { next(err); }
 });
-
 // POST /services/:serviceId/backups/:backupId/restore
-router.post('/services/:serviceId/backups/:backupId/restore', (req, res) => {
-  getService(req.params.serviceId);
-  return res.status(202).json({ status: 'pending', backupId: req.params.backupId });
+router.post('/services/:serviceId/backups/:backupId/restore', async (req, res, next) => {
+  try {
+    return res.status(202).json(await startRestore(getService(req.params.serviceId), req.params.backupId));
+  } catch (err) { next(err); }
 });
 
 export default router;

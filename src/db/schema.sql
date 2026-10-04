@@ -293,6 +293,23 @@ CREATE TABLE IF NOT EXISTS deployment_logs (
   timestamp TEXT NOT NULL
 );
 
+-- Database backups (files live under DATA_DIR/backups/<service_id>/)
+CREATE TABLE IF NOT EXISTS backups (
+  id TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'manual', -- 'manual' | 'scheduled' | 'pre-restore'
+  status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'running', 'completed', 'failed'
+  size INTEGER, -- bytes
+  file TEXT,
+  error TEXT,
+  restore_status TEXT, -- NULL, 'running', 'completed', 'failed'
+  restored_at TEXT,
+  restore_error TEXT,
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backups_service ON backups(service_id, created_at);
+
 -- AI crash analysis, one per deployment
 CREATE TABLE IF NOT EXISTS deployment_diagnoses (
   deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,

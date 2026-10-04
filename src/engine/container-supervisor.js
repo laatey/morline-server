@@ -13,7 +13,7 @@ import { eventBus } from './event-bus.js';
 
 const NETWORK = 'morline-runtime';
 const safeName = (value) => String(value).toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
-const containerName = (serviceId) => `morline-${safeName(serviceId)}`;
+export const containerName = (serviceId) => `morline-${safeName(serviceId)}`;
 const imageName = (serviceId, deploymentId) => `morline/${safeName(serviceId)}:${safeName(deploymentId)}`;
 
 
@@ -125,12 +125,18 @@ export class ContainerSupervisor {
     return info ? this.endpoint(serviceId, info.port) : null;
   }
 
-  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, installCommand, startCommand, runtime, onLog }) {
+  async build(serviceId, deploymentId, { cwd, strategy, dockerfilePath, installCommand, startCommand, runtime, variables = {}, onLog }) {
     const image = imageName(serviceId, deploymentId);
     const log = (level, line) => onLog?.(level, line);
+    // The service's variables are available while building too (VITE_*, NEXT_PUBLIC_*, build scripts).
+    const buildVars = Object.fromEntries(Object.entries(variables).filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)));
     if (strategy === 'dockerfile') {
       const file = dockerfilePath || 'Dockerfile';
-      await run('docker', ['build', '--pull', '--tag', image, '--file', file, '.'], { cwd, onLine: log, stderrLevel: 'info' });
+      // `--build-arg KEY` (no value) reads the value from the environment, so it never appears in a command line.
+      // A Dockerfile receives a variable only if it declares `ARG KEY`.
+      const buildArgs = Object.keys(buildVars).flatMap((key) => ['--build-arg', key]);
+      if (buildArgs.length) log('info', `[Docker] Offering ${Object.keys(buildVars).length} variables as build arguments (declare ARG NAME in the Dockerfile to use one)`);
+      await run('docker', ['build', '--pull', ...buildArgs, '--tag', image, '--file', file, '.'], { cwd, env: buildVars, onLine: log, stderrLevel: 'info' });
     } else {
       // Railpack: `prepare` analyses the source and writes a build plan, then the
       // Railpack BuildKit frontend builds that plan through the mounted Docker daemon.
@@ -141,14 +147,15 @@ export class ContainerSupervisor {
         const planFile = path.join(planDir, 'railpack-plan.json');
         const infoFile = path.join(planDir, 'railpack-info.json');
 
-        // Settings is the one source of truth. Blank fields => Railpack auto-detects.
-        const cfg = {};
+        // The service's variables come first so Settings can still override a RAILPACK_* value.
+        // Blank Settings fields => Railpack auto-detects.
+        const cfg = { ...buildVars };
         if (installCommand) cfg.RAILPACK_INSTALL_CMD = installCommand;
         if (startCommand) cfg.RAILPACK_START_CMD = startCommand;
         if (runtime?.runtime === 'node' && runtime.version) cfg.RAILPACK_NODE_VERSION = String(runtime.version);
         const envArgs = Object.entries(cfg).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
 
-        log('info', `[Railpack] Planning build${Object.keys(cfg).length ? ` (${Object.keys(cfg).join(', ')})` : ''}`);
+        log('info', `[Railpack] Planning build${Object.keys(buildVars).length ? ` with ${Object.keys(buildVars).length} service variable(s) available to the build` : ''}`);
         await run('railpack', ['prepare', cwd, '--plan-out', planFile, '--info-out', infoFile, ...envArgs],
           { cwd, env: cfg, onLine: log, stderrLevel: 'info' });
 
@@ -175,7 +182,7 @@ export class ContainerSupervisor {
         // Post-build sanity check: what actually ended up in the image.
         if (runtime?.runtime === 'node') {
           try {
-            const verifyScript = ['node --version', 'npm --version', `node -p "process.platform + '/' + process.arch"`].join(' && ');
+            const verifyScript = ['node --version', 'npm --version', `node -p "process.platform + '/' + process.arch"`, 'echo "[/app]" && ls -1p /app | head -40', 'test -d /app/dist && echo "[/app/dist]" && ls -1p /app/dist | head -20 || true'].join(' && ');
             await run('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-c', verifyScript],
               { onLine: (_, line) => log('info', `[Container verify] ${line}`) });
           } catch {

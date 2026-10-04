@@ -1,0 +1,11 @@
+{
+  "profile": "morline",
+  "region": "eu-north-1",
+  "bucket": "morline-deploy-602480250061-eu-north-1",
+  "instanceId": "i-060640ca39b79f9fa",
+  "deployRoot": "/opt/morline",
+  "composeFile": "docker-compose.production.yml",
+  "healthUrl": "",
+  "pollSeconds": 5,
+  "timeoutMinutes": 20
+}

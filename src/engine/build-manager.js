@@ -307,6 +307,8 @@ server.listen(port, '0.0.0.0', () => {
         installCommand: railpackInstallCommand,
         startCommand: customStart,
         runtime,
+        // Same set the running container gets: environment + service variables, then morline.json env.
+        variables: { ...containerSupervisor.variables(service.environment_id, serviceId), ...(overrides.env || {}) },
         onLog: (level, message) => ctx.log(level, `[Container build] ${message}`)
       });
       execute('UPDATE deployments SET image = ? WHERE id = ?', image, deploymentId);
@@ -430,7 +432,6 @@ server.listen(port, '0.0.0.0', () => {
     if (explicit && (explicit.startsWith('-') || !/^[A-Za-z0-9_./-]+$/.test(explicit))) {
       throw new BuildError(`Invalid branch name "${explicit}"`);
     }
-    const branches = explicit ? [explicit] : ['main', 'master'];
 
     const token = service.source_url ? null : await this._resolveGithubToken(ctx, repo);
     let authArgs = [];
@@ -462,6 +463,14 @@ server.listen(port, '0.0.0.0', () => {
     await git(['remote', 'remove', 'origin'], { quiet: true });
     await git(['remote', 'add', 'origin', publicUrl]);
 
+    // Ask the remote which branch is its default instead of assuming "main". A stored "main" or
+    // "master" is usually just a default that was filled in at import time, so those fall back
+    // to the real default branch; any other explicitly chosen branch must exist.
+    const head = await git(['ls-remote', '--symref', 'origin', 'HEAD'], { capture: true, quiet: true });
+    const remoteDefault = /^ref: refs\/heads\/(\S+)\s+HEAD/m.exec(head.stdout || '')?.[1] || null;
+    const filledInDefault = !explicit || explicit === 'main' || explicit === 'master';
+    const branches = [...new Set([explicit, ...(filledInDefault ? [remoteDefault, 'main', 'master'] : [])].filter(Boolean))];
+
     let usedBranch = null;
     let lastTail = [];
     for (const branch of branches) {
@@ -473,10 +482,22 @@ server.listen(port, '0.0.0.0', () => {
     }
     if (!usedBranch) {
       // Abort: NEVER replace the user's repo with dummy seed files
+      const missingRef = lastTail.join(' ').includes("couldn't find remote ref");
+      if (explicit && missingRef) {
+        throw new BuildError(
+          `Branch "${explicit}" was not found in ${repo}.${remoteDefault ? ` Its default branch is "${remoteDefault}".` : ''} ` +
+          'Change the branch in Settings, or leave it empty to use the default branch.'
+        );
+      }
       throw new BuildError(
         `Git fetch failed: ${lastTail.slice(-3).join(' ') || 'unknown error'}. ` +
         'Check the repository name, the branch, and that Morline has access to the repo.'
       );
+    }
+    if (explicit && usedBranch !== explicit) {
+      ctx.log('warn', `[Git] Branch "${explicit}" was not found; using the repository's default branch "${usedBranch}" and saving it to Settings`);
+      execute('UPDATE services SET source_branch = ? WHERE id = ?', usedBranch, ctx.serviceId);
+      execute('UPDATE service_settings SET branch = ? WHERE service_id = ?', usedBranch, ctx.serviceId);
     }
 
     const checkout = await git(['checkout', '-q', '-f', '-B', usedBranch, `refs/remotes/origin/${usedBranch}`]);

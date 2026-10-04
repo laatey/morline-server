@@ -1,3 +1,5 @@
+import { resolveGithubSource } from '../services/github-url.js';
+import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
@@ -382,6 +384,8 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
           INSERT INTO service_networking (service_id, public, target_port)
           VALUES (?, 1, 3000)
         `, serviceId);
+
+        if (hasTemplate(templateId)) provisionTemplate(serviceId, templateId, now);
       });
 
       // Launch deployment
@@ -400,9 +404,12 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
     const sourceUrlRaw = req.body?.source?.url || null;
     if (sourceUrlRaw) {
       const serviceId = `srv_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-      const sourceRepo = sourceUrlRaw.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+      const fromUrl = await resolveGithubSource(sourceUrlRaw);
+      if (!fromUrl) throw validationError('That is not a GitHub repository URL', { 'source.url': 'Expected https://github.com/owner/repo' });
+      const sourceRepo = fromUrl.repo;
       const srvName = sourceRepo.split('/').pop() || name;
-      const sourceBranch = req.body?.source?.branch || 'main';
+      const sourceBranch = (req.body?.source?.branch || fromUrl.branch || '').trim() || null;
+      const sourceRootDir = req.body?.source?.rootDirectory || fromUrl.rootDirectory || null;
 
       transaction(() => {
         execute(`
@@ -411,9 +418,9 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
         `, serviceId, envId, srvName, sourceRepo, sourceBranch, sourceUrlRaw, region, now, now);
 
         execute(`
-          INSERT INTO service_settings (service_id, branch, auto_deploy)
-          VALUES (?, ?, 1)
-        `, serviceId, sourceBranch);
+          INSERT INTO service_settings (service_id, branch, root_directory, auto_deploy)
+          VALUES (?, ?, ?, 1)
+        `, serviceId, sourceBranch, sourceRootDir);
 
         execute(`
           INSERT INTO service_networking (service_id, public, target_port)
