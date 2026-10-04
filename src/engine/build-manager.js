@@ -14,6 +14,8 @@ import {
   STATIC_SERVER_SOURCE
 } from './project-detector.js';
 import { resolveRuntime } from './runtime-resolver.js';
+import { saveAppType } from './app-type.js';
+import { reviveFromStop } from './service-lifecycle.js';
 
 const { queryOne, execute } = dbModule;
 
@@ -213,6 +215,14 @@ server.listen(port, '0.0.0.0', () => {
     execute('UPDATE deployments SET state = ?, started_at = ? WHERE id = ?', 'building', new Date().toISOString(), deploymentId);
     execute('UPDATE services SET building_deployment_id = ? WHERE id = ?', deploymentId, serviceId);
     ctx.emit('deployment.updated', { id: deploymentId, state: 'building' });
+    // A stopped service starts again with its previous replica count. Anything not already
+    // serving traffic now shows as deploying; a brand-new service leaves "created".
+    reviveFromStop(serviceId);
+    const before = queryOne('SELECT status FROM services WHERE id = ?', serviceId);
+    if (before && before.status !== 'online') {
+      execute("UPDATE services SET status = 'deploying' WHERE id = ?", serviceId);
+      ctx.emit('service.status', { id: serviceId, status: 'deploying' });
+    }
     ctx.log('info', `[Build] Preparing build in workspace ${ctx.cwd}`);
 
     // 1. Source
@@ -231,6 +241,7 @@ server.listen(port, '0.0.0.0', () => {
     const currentSettings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', serviceId) || settings;
     let workDir = this._resolveWorkDir(ctx, currentSettings);
     const detected = detectProject(workDir);
+    saveAppType(serviceId, workDir, detected);
     const overrides = this._readProjectConfig(ctx, workDir);
     detected.notes.forEach((n) => ctx.log('info', `[Detect] ${n}`));
 
@@ -281,6 +292,11 @@ server.listen(port, '0.0.0.0', () => {
       : DEFAULT_TIMEOUT_MS;
     const env = { ...baseEnv(), ...detected.env, ...vars };
 
+    this._saveSnapshot(ctx, service, currentSettings, overrides, {
+      builder: buildStrategy, installCommand, buildCommand, startCommand: customStart, dockerfilePath,
+      runtimeVersion: runtime?.version || null
+    });
+
     // 4. Build an immutable OCI image. A Dockerfile is authoritative; otherwise
     // Railpack creates an equivalent Docker image from source and nixpacks config.
     if (buildStrategy !== 'compose') {
@@ -298,6 +314,7 @@ server.listen(port, '0.0.0.0', () => {
     this._checkCancelled(ctx);
 
     // 5. Deploy isolated Docker containers or a Compose stack.
+    ctx.phase = 'deploy';
     execute('UPDATE deployments SET state = ? WHERE id = ?', 'deploying', deploymentId);
     ctx.emit('deployment.updated', { id: deploymentId, state: 'deploying' });
     if (buildStrategy === 'compose') {
@@ -313,6 +330,54 @@ server.listen(port, '0.0.0.0', () => {
   }
 
   // ------------------------------------------------------------------ source: github
+
+  // Records exactly what this deployment ran with, so the deployment page can show it later
+  // even after settings/variables change. Secret values are never stored here.
+  _saveSnapshot(ctx, service, settings, overrides, resolved) {
+    try {
+      const rows = dbModule.queryAll(
+        "SELECT scope_type, key, value, secret FROM variables WHERE (scope_type = 'environment' AND scope_id = ?) OR (scope_type = 'service' AND scope_id = ?)",
+        service.environment_id, service.id);
+      const merged = new Map();
+      for (const type of ['environment', 'service']) { // service scope wins, like at runtime
+        for (const r of rows.filter((x) => x.scope_type === type)) merged.set(r.key, r);
+      }
+      const variables = [...merged.values()].map((r) => (
+        r.secret ? { key: r.key, secret: true } : { key: r.key, value: String(r.value ?? '') }
+      ));
+      for (const [key, value] of Object.entries(overrides.env || {})) {
+        if (!merged.has(key)) variables.push({ key, value: String(value) });
+      }
+      const networking = queryOne('SELECT target_port FROM service_networking WHERE service_id = ?', service.id) || {};
+      const dep = queryOne('SELECT commit_branch FROM deployments WHERE id = ?', ctx.deploymentId) || {};
+      const snapshot = {
+        variables,
+        config: {
+          builder: resolved.builder,
+          installCommand: resolved.installCommand || null,
+          buildCommand: resolved.buildCommand || null,
+          startCommand: resolved.startCommand || null,
+          dockerfilePath: resolved.dockerfilePath || null,
+          rootDirectory: (settings.root_directory || '').trim() || null,
+          runtimeVersion: resolved.runtimeVersion,
+          region: service.region || null,
+          replicas: Number(settings.replicas || service.replicas || 1),
+          targetPort: Number(networking.target_port || service.port || 3000),
+          healthcheckPath: settings.healthcheck_path || '/',
+          healthcheckTimeoutSec: Number(settings.healthcheck_timeout_sec || 30),
+          restartPolicy: settings.restart_policy || 'on-failure'
+        },
+        source: service.source_repo ? {
+          type: service.source_type || 'github',
+          repo: service.source_repo,
+          branch: (settings.branch || '').trim() || dep.commit_branch || null
+        } : null
+      };
+      execute('UPDATE deployments SET snapshot = ? WHERE id = ?', JSON.stringify(snapshot), ctx.deploymentId);
+    } catch (err) {
+      ctx.log('warn', `[Build] Could not record deployment snapshot: ${err.message}`);
+    }
+  }
 
   _importRailwaySettings(ctx, settings) {
     // Read from the repository root, before root_directory is applied.
@@ -471,16 +536,22 @@ server.listen(port, '0.0.0.0', () => {
       run,
       cwd: this.getWorkspaceDir(service.id),
       secrets: new Set(),
-      log: (level, message) => {
-        const clean = redact(message, ctx.secrets).trim();
-        if (!clean) return;
+      phase: 'build',
+      log: (level, message, extra = {}) => {
+        // Only the line terminator is removed; indentation and trailing spaces are kept.
+        const clean = redact(message, ctx.secrets).replace(/[\r\n]+$/, '');
+        if (!clean.trim()) return;
         logManager.appendLog({
           deploymentId,
           serviceId: service.id,
           serviceName: service.name,
           environmentId: service.environment_id,
           level,
-          message: clean
+          message: clean,
+          // Everything up to the container start is the build phase; after that it is deploy.
+          phase: ctx.phase || 'build',
+          source: /^\[Container (build|verify)\]/.test(clean) ? 'build' : 'platform',
+          ...extra
         });
       },
       emit: (type, data) => eventBus.emitEnvironmentEvent(service.environment_id, {
@@ -638,11 +709,11 @@ server.listen(port, '0.0.0.0', () => {
       }, timeoutMs);
 
       const onLine = (raw, level) => {
-        const line = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim();
-        if (!line) return;
-        tail.push(line);
+        const line = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+$/, '');
+        if (!line.trim()) return;
+        tail.push(line.trim());
         if (tail.length > 15) tail.shift();
-        if (!quiet) ctx.log(level, line);
+        if (!quiet) ctx.log(level, line, { source: 'build' });
       };
 
       const attach = (stream, level, isStdout) => {
@@ -679,7 +750,7 @@ server.listen(port, '0.0.0.0', () => {
     const summary = known ? err.message : `Unexpected build error: ${err?.message || err}`;
 
     ctx.log('error', `[Build] ${summary}`);
-    if (!known && err?.stack) ctx.log('error', err.stack.split('\n').slice(0, 6).join('\n'));
+    if (!known && err?.stack) ctx.log('error', err.stack.split('\n').slice(0, 40).join('\n'));
 
     try {
       execute('UPDATE deployments SET state = ?, finished_at = ?, error_summary = ? WHERE id = ?',

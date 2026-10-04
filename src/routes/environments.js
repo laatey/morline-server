@@ -264,7 +264,7 @@ router.post('/:environmentId/services', async (req, res, next) => {
     transaction(() => {
       execute(`
         INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_root_dir, source_url, source_image, source_template_id, source_display, region, replicas, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'us-east-1', 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'us-east-1', 1, ?, ?)
       `, serviceId, env.id, serviceName, kind, logo, posX, posY,
         sourceUrl ? 'github' : sourceType,
         sourceRepo, sourceBranch, sourceRootDir, sourceUrl, sourceImage, sourceTemplateId, sourceDisplay, now, now);

@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'node:path';
 import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
 import { initDb } from './db/index.js';
+import { backfillAppTypes } from './engine/app-type.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -29,6 +30,7 @@ import templatesRouter from './routes/templates.js';
 
 // Initialize Database & Seeds
 initDb();
+try { backfillAppTypes(); } catch (err) { console.warn('[AppType] Backfill skipped:', err.message); }
 
 const app = express();
 

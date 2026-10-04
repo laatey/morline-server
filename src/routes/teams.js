@@ -370,7 +370,7 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
       transaction(() => {
         execute(`
           INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_template_id, region, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, 'queued', 100, 100, 'template', ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, 'created', 100, 100, 'template', ?, ?, ?, ?)
         `, serviceId, envId, srvName, template?.kind || 'app', template?.logo || 'js', templateId, region, now, now);
 
         execute(`
@@ -407,7 +407,7 @@ router.post('/teams/:teamId/projects', requireAuth, async (req, res, next) => {
       transaction(() => {
         execute(`
           INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_url, region, created_at, updated_at)
-          VALUES (?, ?, ?, 'app', 'js', 'queued', 100, 100, 'github', ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, 'app', 'js', 'created', 100, 100, 'github', ?, ?, ?, ?, ?, ?)
         `, serviceId, envId, srvName, sourceRepo, sourceBranch, sourceUrlRaw, region, now, now);
 
         execute(`

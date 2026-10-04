@@ -8,6 +8,8 @@ import { logManager } from '../engine/log-manager.js';
 import { buildManager } from '../engine/build-manager.js';
 import { eventBus } from '../engine/event-bus.js';
 import { PUBLIC_URL } from '../config.js';
+import { getDiagnosis, startDiagnosis, dismissDiagnosis, createDiagnosisPullRequest } from '../engine/diagnosis-manager.js';
+import { validationError } from '../middleware/error-handler.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -16,6 +18,12 @@ function getDeployment(deploymentId) {
   const dep = queryOne('SELECT * FROM deployments WHERE id = ?', deploymentId);
   if (!dep) throw notFound('Deployment not found');
   return dep;
+}
+
+function parsePhase(value) {
+  if (value === undefined || value === '') return null;
+  if (value === 'build' || value === 'deploy') return value;
+  throw validationError('phase must be "build" or "deploy"', { phase: 'Expected build or deploy' });
 }
 
 // GET /deployments/:deploymentId
@@ -32,7 +40,23 @@ router.get('/:deploymentId', (req, res) => {
   }
 
   const mapped = mapDeployment(dep, user);
-  return res.json(mapDeploymentDetail(mapped, [], url));
+
+  // What this deployment actually ran with, recorded when it was built. Deployments that
+  // predate snapshots get empty variables and null config; source falls back to the service.
+  let snapshot = null;
+  try { snapshot = dep.snapshot ? JSON.parse(dep.snapshot) : null; } catch { /* corrupt snapshot */ }
+  let source = snapshot?.source ?? null;
+  if (!snapshot) {
+    const svc = queryOne('SELECT source_type, source_repo FROM services WHERE id = ?', dep.service_id);
+    if (svc?.source_repo) source = { type: svc.source_type || 'github', repo: svc.source_repo, branch: dep.commit_branch || null };
+  }
+
+  return res.json({
+    ...mapDeploymentDetail(mapped, [], url),
+    variables: snapshot?.variables ?? [],
+    config: snapshot?.config ?? null,
+    source
+  });
 });
 
 // POST /deployments/:deploymentId/redeploy
@@ -119,8 +143,9 @@ router.get('/:deploymentId/logs', (req, res) => {
   const cursor = req.query.cursor;
   const level = req.query.level ? (Array.isArray(req.query.level) ? req.query.level : [req.query.level]) : null;
   const q = req.query.q || null;
+  const phase = parsePhase(req.query.phase);
 
-  const page = logManager.getDeploymentLogs(dep.id, { limit, cursor, level, q });
+  const page = logManager.getDeploymentLogs(dep.id, { limit, cursor, level, q, phase });
   return res.json(page);
 });
 
@@ -133,8 +158,10 @@ router.get('/:deploymentId/logs/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
+  const phase = parsePhase(req.query.phase);
+
   // Send existing logs first
-  const existing = logManager.getDeploymentLogs(dep.id, { limit: 100 });
+  const existing = logManager.getDeploymentLogs(dep.id, { limit: 100, phase });
   for (const line of existing.data) {
     res.write(`event: line\n`);
     res.write(`data: ${JSON.stringify(line)}\n\n`);
@@ -152,6 +179,7 @@ router.get('/:deploymentId/logs/stream', (req, res) => {
   }, 15000);
 
   const onLog = (logLine) => {
+    if (phase && logLine.phase !== phase) return;
     res.write(`event: line\n`);
     res.write(`data: ${JSON.stringify(logLine)}\n\n`);
   };
@@ -179,6 +207,45 @@ router.get('/:deploymentId/logs/stream', (req, res) => {
     eventBus.off(`deployment:${dep.id}:log`, onLog);
     eventBus.off(`environment:${dep.environment_id}`, onEnvEvent);
   });
+});
+
+// GET /deployments/:deploymentId/diagnosis
+router.get('/:deploymentId/diagnosis', (req, res) => {
+  const dep = getDeployment(req.params.deploymentId);
+  const diagnosis = getDiagnosis(dep.id);
+  if (!diagnosis) throw notFound('No diagnosis for this deployment', 'diagnosis_not_found');
+  return res.json(diagnosis);
+});
+
+// POST /deployments/:deploymentId/diagnosis - start the analysis; the app polls the GET above
+router.post('/:deploymentId/diagnosis', (req, res, next) => {
+  try {
+    const dep = getDeployment(req.params.deploymentId);
+    return res.status(202).json(startDiagnosis(dep));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /deployments/:deploymentId/diagnosis/pull-request
+router.post('/:deploymentId/diagnosis/pull-request', async (req, res, next) => {
+  try {
+    const dep = getDeployment(req.params.deploymentId);
+    const { url, number } = await createDiagnosisPullRequest(dep);
+    return res.json({ url, number });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /deployments/:deploymentId/diagnosis/dismiss
+router.post('/:deploymentId/diagnosis/dismiss', (req, res, next) => {
+  try {
+    const dep = getDeployment(req.params.deploymentId);
+    return res.json(dismissDiagnosis(dep.id));
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

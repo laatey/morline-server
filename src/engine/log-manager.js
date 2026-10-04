@@ -4,28 +4,26 @@ import { mapLogLine } from '../db/mappers.js';
 import { eventBus } from './event-bus.js';
 
 class LogManager {
-  appendLog({ deploymentId, serviceId, serviceName, environmentId, replica = 0, level = 'info', message, attributes = null }) {
+  appendLog({ deploymentId, serviceId, serviceName, environmentId, replica = 0, level = 'info', message, attributes = null, phase = null, source = null, container = null, replicaId = null, stream = null }) {
     const id = `log_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const timestamp = new Date().toISOString();
-    const attrsJson = attributes ? JSON.stringify(attributes) : null;
+    const merged = { ...(attributes || {}) };
+    if (source) merged.source = source;
+    if (container) merged.container = container;
+    if (replicaId) merged.replicaId = replicaId;
+    if (stream) merged.stream = stream;
+    const attrsJson = Object.keys(merged).length ? JSON.stringify(merged) : null;
 
     try {
       execute(`
-        INSERT INTO deployment_logs (id, deployment_id, service_id, service_name, environment_id, replica, level, message, attributes, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, id, deploymentId, serviceId, serviceName, environmentId, replica, level, message, attrsJson, timestamp);
+        INSERT INTO deployment_logs (id, deployment_id, service_id, service_name, environment_id, replica, level, message, attributes, phase, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, id, deploymentId, serviceId, serviceName, environmentId, replica, level, message, attrsJson, phase, timestamp);
 
-      const logLine = {
-        id,
-        timestamp,
-        serviceId,
-        serviceName,
-        deploymentId,
-        replica,
-        level,
-        message,
-        attributes: attributes || {}
-      };
+      const logLine = mapLogLine({
+        id, timestamp, service_id: serviceId, service_name: serviceName, deployment_id: deploymentId,
+        replica, level, phase, message, attributes: attrsJson
+      });
 
       eventBus.emitDeploymentLog(deploymentId, logLine);
       if (environmentId) {
@@ -39,9 +37,14 @@ class LogManager {
     }
   }
 
-  getDeploymentLogs(deploymentId, { limit = 100, cursor = null, level = null, q = null } = {}) {
+  getDeploymentLogs(deploymentId, { limit = 100, cursor = null, level = null, q = null, phase = null } = {}) {
     let sql = 'SELECT * FROM deployment_logs WHERE deployment_id = ?';
     const params = [deploymentId];
+
+    if (phase) {
+      sql += ' AND phase = ?';
+      params.push(phase);
+    }
 
     if (level && level.length > 0) {
       const placeholders = level.map(() => '?').join(',');

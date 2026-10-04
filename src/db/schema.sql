@@ -131,7 +131,10 @@ CREATE TABLE IF NOT EXISTS services (
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'app',
   logo TEXT NOT NULL DEFAULT 'js',
-  status TEXT NOT NULL DEFAULT 'queued',
+  status TEXT NOT NULL DEFAULT 'created', -- 'created' (never deployed), 'deploying', 'online', 'crashed', 'sleeping', 'stopped'
+  framework TEXT, -- from build detection, e.g. 'nextjs', 'django'
+  runtime TEXT, -- from build detection, e.g. 'node', 'python', 'go'
+  replicas_before_stop INTEGER,
   position_x REAL NOT NULL DEFAULT 0,
   position_y REAL NOT NULL DEFAULT 0,
   source_type TEXT NOT NULL DEFAULT 'template',
@@ -256,6 +259,7 @@ CREATE TABLE IF NOT EXISTS deployments (
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   rollback_of_deployment_id TEXT,
   rollbackable INTEGER NOT NULL DEFAULT 1,
+  snapshot TEXT, -- JSON: { variables, config, source } as used at deploy time
   error_summary TEXT,
   started_at TEXT,
   finished_at TEXT,
@@ -285,7 +289,26 @@ CREATE TABLE IF NOT EXISTS deployment_logs (
   level TEXT NOT NULL DEFAULT 'info', -- 'debug', 'info', 'warn', 'error'
   message TEXT NOT NULL,
   attributes TEXT, -- JSON
+  phase TEXT, -- 'build' | 'deploy'
   timestamp TEXT NOT NULL
+);
+
+-- AI crash analysis, one per deployment
+CREATE TABLE IF NOT EXISTS deployment_diagnoses (
+  deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'running', 'completed', 'failed'
+  summary TEXT,
+  root_cause TEXT,
+  suggested_fix TEXT,
+  can_auto_fix INTEGER NOT NULL DEFAULT 0,
+  fix_title TEXT,
+  fix_files TEXT, -- JSON [{ path, diff, content, baseHash }]; content/baseHash never leave the server
+  pr_url TEXT,
+  pr_number INTEGER,
+  dismissed INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 -- Notifications

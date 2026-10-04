@@ -8,6 +8,7 @@ import { containerSupervisor } from '../engine/container-supervisor.js';
 import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
+import { reviveFromStop } from '../engine/service-lifecycle.js';
 import { BASE_DOMAIN } from '../config.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
@@ -69,7 +70,7 @@ function getServiceDetail(service) {
     healthcheckPath: settings.healthcheck_path || '/',
     healthcheckTimeoutSec: Number(settings.healthcheck_timeout_sec || 30),
     restartPolicy: settings.restart_policy || 'on-failure',
-    replicas: Number(settings.replicas || 1),
+    replicas: Number(settings.replicas ?? 1),
     cronSchedule: settings.cron_schedule || null,
     sleepAfterMinutes: settings.sleep_after_minutes ? Number(settings.sleep_after_minutes) : null,
     cpuLimit: settings.cpu_limit ? Number(settings.cpu_limit) : null,
@@ -189,6 +190,7 @@ router.delete('/services/:serviceId', async (req, res) => {
 router.post('/services/:serviceId/restart', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
+    reviveFromStop(service.id, { reviveDeployment: true });
     execute('UPDATE services SET status = ? WHERE id = ?', 'deploying', service.id);
 
     eventBus.emitEnvironmentEvent(service.environment_id, {
@@ -205,6 +207,48 @@ router.post('/services/:serviceId/restart', async (req, res, next) => {
 
     const updated = queryOne('SELECT * FROM services WHERE id = ?', service.id);
     return res.status(202).json(mapService(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /services/:serviceId/stop
+// Stops the running deployment and sets replicas to 0. Every setting, variable, domain and
+// volume is kept, and restart / wake / a new deployment bring the service back.
+router.post('/services/:serviceId/stop', async (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+    if (service.status === 'stopped') return res.json(mapService(service)); // already stopped
+
+    const everDeployed = queryOne('SELECT 1 AS found FROM deployments WHERE service_id = ? LIMIT 1', service.id);
+    if (!everDeployed) throw conflict('This service has not been deployed yet, so there is nothing to stop', 'not_deployed');
+
+    // End an in-flight build first and wait for it, so it cannot overwrite the status below.
+    const run = buildManager.active.get(service.id);
+    if (buildManager.cancel(service.id) && run?.done) {
+      await Promise.race([run.done, new Promise((resolve) => setTimeout(resolve, 15000))]);
+    }
+    await containerSupervisor.stopService(service.id, false);
+
+    const at = new Date().toISOString();
+    const current = queryOne('SELECT * FROM services WHERE id = ?', service.id);
+    const retired = current.active_deployment_id
+      ? queryOne("SELECT id FROM deployments WHERE id = ? AND state = 'active'", current.active_deployment_id) : null;
+
+    transaction(() => {
+      execute(`UPDATE services SET status = 'stopped', replicas = 0, building_deployment_id = NULL,
+        replicas_before_stop = CASE WHEN replicas > 0 THEN replicas ELSE replicas_before_stop END WHERE id = ?`, service.id);
+      execute('UPDATE service_settings SET replicas = 0 WHERE service_id = ?', service.id);
+      if (retired) execute("UPDATE deployments SET state = 'removed' WHERE id = ?", retired.id);
+    });
+
+    const emit = (type, data) => eventBus.emitEnvironmentEvent(service.environment_id, {
+      type, at, actorId: req.user.id, canvasRevision: null, data
+    });
+    if (retired) emit('deployment.updated', { id: retired.id, state: 'removed' });
+    emit('service.status', { id: service.id, status: 'stopped' });
+
+    return res.json(mapService(queryOne('SELECT * FROM services WHERE id = ?', service.id)));
   } catch (err) {
     next(err);
   }
@@ -232,6 +276,7 @@ router.post('/services/:serviceId/sleep', async (req, res) => {
 router.post('/services/:serviceId/wake', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
+    reviveFromStop(service.id);
     execute('UPDATE services SET status = ? WHERE id = ?', 'deploying', service.id);
 
     const depId = service.active_deployment_id || `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -261,10 +306,10 @@ router.post('/services/:serviceId/duplicate', (req, res, next) => {
     transaction(() => {
       execute(`
         INSERT INTO services (id, environment_id, name, kind, logo, status, position_x, position_y, source_type, source_repo, source_branch, source_root_dir, source_image, source_template_id, source_display, region, replicas, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, newId, service.environment_id, newName, service.kind, service.logo, posX, posY,
         service.source_type, service.source_repo, service.source_branch, service.source_root_dir,
-        service.source_image, service.source_template_id, service.source_display, service.region, service.replicas, now, now);
+        service.source_image, service.source_template_id, service.source_display, service.region, Math.max(1, Number(service.replicas) || 1), now, now);
 
       const origSettings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', service.id);
       if (origSettings) {
@@ -273,7 +318,7 @@ router.post('/services/:serviceId/duplicate', (req, res, next) => {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, newId, origSettings.branch, origSettings.root_directory, origSettings.auto_deploy,
           origSettings.build_command, origSettings.start_command, origSettings.healthcheck_path,
-          origSettings.healthcheck_timeout_sec, origSettings.restart_policy, origSettings.replicas);
+          origSettings.healthcheck_timeout_sec, origSettings.restart_policy, Math.max(1, Number(origSettings.replicas) || 1));
       }
 
       execute(`

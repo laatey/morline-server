@@ -291,20 +291,25 @@ export class ContainerSupervisor {
   followLogs(service, info) {
     const child = spawn('docker', ['logs', '--follow', '--tail', '0', info.name], { stdio: ['ignore', 'pipe', 'pipe'] });
     info.logChild = child;
-    const capture = (stream) => {
+    const capture = (stream, streamName) => {
       const classify = makeLevelClassifier();
       let buffer = '';
       stream.on('data', (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split(/\r?\n/); buffer = lines.pop();
-        for (const message of lines.filter(Boolean)) this.log(service, info, classify(message), message);
+        for (const message of lines.filter(Boolean)) this.log(service, info, classify(message), message, { source: 'container', stream: streamName });
       });
     };
-    capture(child.stdout); capture(child.stderr);
+    capture(child.stdout, 'stdout'); capture(child.stderr, 'stderr');
   }
 
-  log(service, info, level, message) {
-    logManager.appendLog({ deploymentId: info.deploymentId, serviceId: service.id, serviceName: service.name, environmentId: service.environment_id, level, message });
+  log(service, info, level, message, extra = {}) {
+    logManager.appendLog({
+      deploymentId: info.deploymentId, serviceId: service.id, serviceName: service.name, environmentId: service.environment_id,
+      level, message, phase: 'deploy',
+      source: 'platform', container: info.name || null, replicaId: `${service.id}-0`,
+      ...extra
+    });
   }
 
   // 'http' = answered HTTP, 'tcp' = port open but not speaking HTTP (databases etc.), 'down' = nothing there.
@@ -415,6 +420,12 @@ export class ContainerSupervisor {
     const at = new Date().toISOString();
     execute('UPDATE services SET status = ?, active_deployment_id = ?, building_deployment_id = NULL WHERE id = ?', 'online', deploymentId, serviceId);
     execute('UPDATE deployments SET state = ?, finished_at = ? WHERE id = ?', 'active', at, deploymentId);
+    // The deployment this one replaces is now retired.
+    const replaced = queryAll("SELECT id FROM deployments WHERE service_id = ? AND state = 'active' AND id != ?", serviceId, deploymentId);
+    for (const old of replaced) {
+      execute('UPDATE deployments SET state = ? WHERE id = ?', 'removed', old.id);
+      eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: old.id, state: 'removed' } });
+    }
     const info = this.processes.get(serviceId);
     if (note && info) this.log(service, info, level, `[Deploy] ${note}`);
     // The UI tracks deployment progress from deployment.updated events. Emitting only

@@ -38,6 +38,30 @@ export function initDb() {
 }
 
 function applyMigrations(db) {
+  // 0. Deploy-time snapshot, log phases (build vs deploy)
+  const deploymentCols = db.prepare('PRAGMA table_info(deployments);').all().map(c => c.name);
+  if (!deploymentCols.includes('snapshot')) db.exec('ALTER TABLE deployments ADD COLUMN snapshot TEXT;');
+  const logCols = db.prepare('PRAGMA table_info(deployment_logs);').all().map(c => c.name);
+  if (!logCols.includes('phase')) {
+    db.exec('ALTER TABLE deployment_logs ADD COLUMN phase TEXT;');
+    // One-off backfill for logs written before phases existed: platform build messages are
+    // prefixed, everything else was runtime output from the running container.
+    db.exec(`UPDATE deployment_logs SET phase = CASE
+      WHEN message LIKE '[Build]%' OR message LIKE '[Git]%' OR message LIKE '[Detect]%'
+        OR message LIKE '[Container build]%' OR message LIKE '[Container verify]%' THEN 'build'
+      ELSE 'deploy' END WHERE phase IS NULL;`);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_logs_deploy_phase ON deployment_logs(deployment_id, phase);');
+
+  // Service app type, stop support, and the "created" status for never-deployed services
+  const serviceCols = db.prepare('PRAGMA table_info(services);').all().map(c => c.name);
+  if (!serviceCols.includes('framework')) db.exec('ALTER TABLE services ADD COLUMN framework TEXT;');
+  if (!serviceCols.includes('runtime')) db.exec('ALTER TABLE services ADD COLUMN runtime TEXT;');
+  if (!serviceCols.includes('replicas_before_stop')) db.exec('ALTER TABLE services ADD COLUMN replicas_before_stop INTEGER;');
+  db.exec(`UPDATE services SET status = 'created'
+    WHERE status IN ('queued', 'deploying')
+      AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.service_id = services.id);`);
+
   // 1. Ensure onboarding_state has rich progress columns
   const onboardingCols = db.prepare('PRAGMA table_info(onboarding_state);').all().map(c => c.name);
   if (!onboardingCols.includes('step')) db.exec('ALTER TABLE onboarding_state ADD COLUMN step INTEGER NOT NULL DEFAULT 0;');

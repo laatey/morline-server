@@ -172,14 +172,16 @@ export function mapService(row, extra = {}) {
     name: row.name,
     kind: row.kind || 'app',
     logo: row.logo || 'js',
-    status: row.status || 'queued',
+    status: row.status || 'created',
+    framework: row.framework || null,
+    runtime: row.runtime || null,
     position: {
       x: Number(row.position_x || 0),
       y: Number(row.position_y || 0)
     },
     source,
     region: row.region || 'us-east-1',
-    replicas: Number(row.replicas || 1),
+    replicas: Number(row.replicas ?? 1),
     port: row.port !== null && row.port !== undefined ? Number(row.port) : null,
     primaryDomain: row.primary_domain || null,
     volume: extra.volume || null,
@@ -341,6 +343,7 @@ export function mapLogLine(row) {
   try {
     if (row.attributes) attributes = JSON.parse(row.attributes);
   } catch (e) {}
+  const { source, container, replicaId, stream, ...rest } = attributes;
   return {
     id: row.id,
     timestamp: row.timestamp,
@@ -348,9 +351,15 @@ export function mapLogLine(row) {
     serviceName: row.service_name,
     deploymentId: row.deployment_id,
     replica: Number(row.replica || 0),
+    replicaId: attributes.replicaId ?? null,
     level: row.level || 'info',
+    phase: row.phase || null,
+    // Extra context lifted to top-level fields; the log detail view lists every field.
+    source: attributes.source ?? null,
+    container: attributes.container ?? null,
+    stream: attributes.stream ?? null,
     message: row.message,
-    attributes
+    attributes: rest
   };
 }
 
