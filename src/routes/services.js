@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
 import { mapService, mapServiceDetail, mapDeployment, mapDomain, mapVariable, mapVolume } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -9,6 +10,10 @@ import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { reviveFromStop } from '../engine/service-lifecycle.js';
+import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
+import { listRepoDirectories } from '../services/repo-directories.js';
+import { APPS_DIR } from '../config.js';
+import { AppError } from '../middleware/error-handler.js';
 import { BASE_DOMAIN } from '../config.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
@@ -59,7 +64,7 @@ function getServiceDetail(service) {
   };
 
   const mappedSettings = settings ? {
-    branch: settings.branch || 'main',
+    branch: settings.branch || service.source_branch || 'main',
     rootDirectory: settings.root_directory || null,
     basePath: settings.base_path || null,
     autoDeploy: Boolean(settings.auto_deploy),
@@ -122,7 +127,11 @@ router.patch('/services/:serviceId', (req, res, next) => {
       const sUpdates = [];
       const sParams = [];
 
-      if (settings.branch !== undefined) { sUpdates.push('branch = ?'); sParams.push(settings.branch); }
+      if (settings.branch !== undefined) {
+        sUpdates.push('branch = ?'); sParams.push(settings.branch || null);
+        // The build reads the branch from the service's source, so keep the two in step.
+        execute('UPDATE services SET source_branch = ?, updated_at = ? WHERE id = ?', String(settings.branch || '').trim() || null, new Date().toISOString(), service.id);
+      }
       if (settings.rootDirectory !== undefined) { sUpdates.push('root_directory = ?'); sParams.push(settings.rootDirectory); }
       if (settings.basePath !== undefined) { sUpdates.push('base_path = ?'); sParams.push(settings.basePath); }
       if (settings.autoDeploy !== undefined) { sUpdates.push('auto_deploy = ?'); sParams.push(settings.autoDeploy ? 1 : 0); }
@@ -249,6 +258,32 @@ router.post('/services/:serviceId/stop', async (req, res, next) => {
     emit('service.status', { id: service.id, status: 'stopped' });
 
     return res.json(mapService(queryOne('SELECT * FROM services WHERE id = ?', service.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /services/:serviceId/directories
+// Folders of the service's repository for the Root directory picker: ["/", "/api", "/packages/ui"]
+router.get('/services/:serviceId/directories', async (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+    const repo = parseGithubUrl(service.source_repo)?.repo;
+    if (!repo) return res.json(['/']); // image, template or Compose services have no repository
+
+    const settings = queryOne('SELECT branch FROM service_settings WHERE service_id = ?', service.id) || {};
+    const branch = String(settings.branch || service.source_branch || '').trim() || null;
+    // Pasted-URL imports are public and cloned anonymously, like the build does.
+    const token = service.source_url ? null : await buildManager._resolveGithubToken({ serviceId: service.id, log: () => {} }, repo);
+
+    try {
+      return res.json(await listRepoDirectories({
+        workspace: path.join(APPS_DIR, service.id), repo, branch, token, cacheKey: service.id
+      }));
+    } catch (err) {
+      if (!err.unreachable) throw err;
+      throw new AppError(`${err.message}. Check that the repository is public or that GitHub is connected.`, 502, 'repository_unavailable');
+    }
   } catch (err) {
     next(err);
   }
@@ -643,7 +678,11 @@ router.get('/services/:serviceId/variables/suggestions', async (req, res, next) 
     }
 
     const cleanRepo = service.source_repo.replace(/\.git$/, '');
-    const branch = service.source_branch || 'main';
+    const branch = service.source_branch || await defaultBranchOf(cleanRepo) || 'main';
+    // Monorepo apps keep their .env.example inside the root directory, so look there first.
+    const rootSetting = queryOne('SELECT root_directory FROM service_settings WHERE service_id = ?', service.id)?.root_directory;
+    const rootDir = String(rootSetting || service.source_root_dir || '').trim().replace(/^\/+|\/+$/g, '');
+    const prefixes = rootDir && rootDir !== '.' && !rootDir.includes('..') ? [`${rootDir}/`, ''] : [''];
 
     // Try to get a token for this repo
     const { getRepoInstallationToken } = await import('../services/github-app.js');
@@ -666,8 +705,8 @@ router.get('/services/:serviceId/variables/suggestions', async (req, res, next) 
     let envContent = null;
     let foundSource = '.env.example';
 
-    for (const filename of candidates) {
-      const url = `https://api.github.com/repos/${cleanRepo}/contents/${filename}?ref=${branch}`;
+    for (const filename of prefixes.flatMap((p) => candidates.map((c) => p + c))) {
+      const url = `https://api.github.com/repos/${cleanRepo}/contents/${filename}?ref=${encodeURIComponent(branch)}`;
       try {
         const r = await fetch(url, { headers });
         if (r.ok) {
@@ -687,7 +726,7 @@ router.get('/services/:serviceId/variables/suggestions', async (req, res, next) 
       const fs = await import('node:fs');
       const path = await import('node:path');
       const localAppDir = path.join(APPS_DIR, service.id);
-      for (const filename of candidates) {
+      for (const filename of prefixes.flatMap((p) => candidates.map((c) => p + c))) {
         const localPath = path.join(localAppDir, filename);
         if (fs.existsSync(localPath)) {
           try {
