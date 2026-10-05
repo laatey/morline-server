@@ -19,7 +19,10 @@ https:// {
 	}
 }
 
-# Plain HTTP: certificate challenges are answered by Caddy itself, everything else is sent to HTTPS.
+# Plain HTTP: certificate challenges are answered by Caddy itself, /health is proxied, everything else is sent to HTTPS.
 http:// {
+	handle /health {
+		reverse_proxy morline-api:3001
+	}
 	redir https://{host}{uri} permanent
 }

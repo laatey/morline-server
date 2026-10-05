@@ -4,7 +4,7 @@
   "bucket": "morline-deploy-602480250061-eu-north-1",
   "instanceId": "i-060640ca39b79f9fa",
   "deployRoot": "/opt/morline",
-  "composeFile": "docker-compose.production.yml",
+  "composeFile": "docker-compose.production.yml -f edge/docker-compose.edge.yml",
   "healthUrl": "https://api.morline.space/health",
   "pollSeconds": 5,
   "timeoutMinutes": 20
