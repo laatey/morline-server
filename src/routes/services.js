@@ -11,6 +11,7 @@ import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { reviveFromStop } from '../engine/service-lifecycle.js';
 import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
+import { normalizeHost, hostProblem, newToken, dnsRecordsFor } from '../engine/domain-manager.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore } from '../engine/database-manager.js';
 import { APPS_DIR } from '../config.js';
@@ -484,7 +485,7 @@ router.patch('/services/:serviceId/networking', (req, res) => {
 });
 
 // POST /services/:serviceId/domains
-router.post('/services/:serviceId/domains', (req, res, next) => {
+router.post('/services/:serviceId/domains', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
     const { kind = 'custom', host, targetPort = 3000 } = req.body || {};
@@ -499,7 +500,9 @@ router.post('/services/:serviceId/domains', (req, res, next) => {
       status = 'active';
     } else {
       domainKind = 'custom';
-      cleanHost = host.toLowerCase().trim();
+      cleanHost = normalizeHost(host);
+      const problem = hostProblem(cleanHost);
+      if (problem) throw validationError(problem, { host: problem });
       status = 'pending';
     }
 
@@ -509,17 +512,20 @@ router.post('/services/:serviceId/domains', (req, res, next) => {
     const domainId = `dom_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
 
-    const dnsRecords = JSON.stringify([
-      { type: 'CNAME', name: cleanHost, value: `edge.${BASE_DOMAIN}`, verified: domainKind === 'generated' }
-    ]);
+    const verificationToken = domainKind === 'custom' ? newToken() : null;
+    const dnsRecords = JSON.stringify(domainKind === 'custom'
+      ? await dnsRecordsFor({ host: cleanHost, verification_token: verificationToken })
+      : [{ type: 'CNAME', name: cleanHost, value: `edge.${BASE_DOMAIN}`, verified: true }]);
+    // Generated hosts are ours, so they are live at once. A custom domain must be proven first.
+    const live = domainKind === 'generated' ? 1 : 0;
 
     transaction(() => {
       execute(`
-        INSERT INTO domains (id, environment_id, service_id, service_name, host, kind, status, target_port, tls_configured, dns_records, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-      `, domainId, service.environment_id, service.id, service.name, cleanHost, domainKind, status, targetPort, dnsRecords, now);
+        INSERT INTO domains (id, environment_id, service_id, service_name, host, kind, status, target_port, tls_configured, dns_records, verification_token, verified_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, domainId, service.environment_id, service.id, service.name, cleanHost, domainKind, status, targetPort, live, dnsRecords, verificationToken, live ? now : null, now);
 
-      if (!service.primary_domain) {
+      if (!service.primary_domain && domainKind === 'generated') {
         execute('UPDATE services SET primary_domain = ? WHERE id = ?', cleanHost, service.id);
       }
     });

@@ -3,9 +3,9 @@ import dns from 'node:dns/promises';
 import { execute, queryOne } from '../db/index.js';
 import { mapDomain } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
-import { notFound } from '../middleware/error-handler.js';
+import { notFound, validationError } from '../middleware/error-handler.js';
 import { eventBus } from '../engine/event-bus.js';
-import { BASE_DOMAIN } from '../config.js';
+import { checkDomain, emitDomainUpdate } from '../engine/domain-manager.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -32,7 +32,10 @@ router.patch('/:domainId', (req, res, next) => {
     const params = [];
 
     if (serviceId !== undefined) {
-      const srv = serviceId ? queryOne('SELECT name FROM services WHERE id = ?', serviceId) : null;
+      const srv = serviceId ? queryOne('SELECT name, environment_id FROM services WHERE id = ?', serviceId) : null;
+      if (serviceId && (!srv || srv.environment_id !== domain.environment_id)) {
+        throw validationError('That service is not in the same environment as this domain', { serviceId: 'Not found in this environment' });
+      }
       updates.push('service_id = ?');
       params.push(serviceId || null);
       updates.push('service_name = ?');
@@ -87,92 +90,18 @@ router.delete('/:domainId', (req, res) => {
 });
 
 // POST /domains/:domainId/verify
+// Checks the TXT ownership record and that the domain points at the edge, then records the result.
 router.post('/:domainId/verify', async (req, res, next) => {
   try {
     const domain = getDomain(req.params.domainId);
-    const now = new Date().toISOString();
-
-    // Generated domains under BASE_DOMAIN are always verified
-    if (domain.kind === 'generated' || domain.host.endsWith(`.${BASE_DOMAIN}`)) {
-      execute(`
-        UPDATE domains SET status = 'active', tls_configured = 1, last_checked_at = ?, error = NULL
-        WHERE id = ?
-      `, now, domain.id);
-      if (domain.service_id) {
-        execute('UPDATE services SET primary_domain = ? WHERE id = ?', domain.host, domain.service_id);
-      }
-      const updated = queryOne('SELECT * FROM domains WHERE id = ?', domain.id);
-      return res.json(mapDomain(updated));
+    if (domain.kind !== 'custom') {
+      // Hosts under the base domain are ours and always live.
+      execute("UPDATE domains SET status = 'active', tls_configured = 1, last_checked_at = ?, error = NULL WHERE id = ?", new Date().toISOString(), domain.id);
+      return res.json(mapDomain(getDomain(domain.id)));
     }
-
-    let verified = false;
-    let checkError = null;
-
-    try {
-      // 1. Check CNAME record
-      const cnames = await dns.resolveCname(domain.host).catch(() => []);
-      const targetEdge = `edge.${BASE_DOMAIN}`.toLowerCase();
-      if (cnames.some(c => c.toLowerCase() === targetEdge || c.toLowerCase().includes(BASE_DOMAIN))) {
-        verified = true;
-      }
-    } catch (e) {}
-
-    // 2. Check if IP points to edge
-    if (!verified) {
-      try {
-        const aRecords = await dns.resolve4(domain.host).catch(() => []);
-        if (aRecords.length > 0) {
-          const edgeAddresses = await dns.resolve4(`edge.${BASE_DOMAIN}`).catch(() => []);
-          if (edgeAddresses.length > 0 && aRecords.some(ip => edgeAddresses.includes(ip))) {
-            verified = true;
-          } else {
-            const edgeLookup = await dns.lookup(`edge.${BASE_DOMAIN}`).catch(() => null);
-            if (edgeLookup && aRecords.includes(edgeLookup.address)) {
-              verified = true;
-            }
-          }
-        }
-      } catch (e) {}
-    }
-
-    // 3. Fallback: check dns.lookup
-    if (!verified) {
-      try {
-        const lookup = await dns.lookup(domain.host).catch(() => null);
-        const edgeLookup = await dns.lookup(`edge.${BASE_DOMAIN}`).catch(() => null);
-        if (lookup && edgeLookup && lookup.address === edgeLookup.address) {
-          verified = true;
-        }
-      } catch (e) {}
-    }
-
-    if (verified) {
-      execute(`
-        UPDATE domains SET status = 'active', tls_configured = 1, last_checked_at = ?, error = NULL
-        WHERE id = ?
-      `, now, domain.id);
-      if (domain.service_id) {
-        execute('UPDATE services SET primary_domain = ? WHERE id = ?', domain.host, domain.service_id);
-      }
-    } else {
-      checkError = `DNS not pointed to edge.${BASE_DOMAIN}`;
-      execute(`
-        UPDATE domains SET status = 'pending', tls_configured = 0, last_checked_at = ?, error = ?
-        WHERE id = ?
-      `, now, checkError, domain.id);
-    }
-
-    const updated = queryOne('SELECT * FROM domains WHERE id = ?', domain.id);
-    const mapped = mapDomain(updated);
-
-    eventBus.emitEnvironmentEvent(domain.environment_id, {
-      type: 'domain.updated',
-      at: now,
-      actorId: req.user.id,
-      canvasRevision: null,
-      data: mapped
-    });
-
+    const { row } = await checkDomain(domain, req.user.id);
+    const mapped = mapDomain(row);
+    emitDomainUpdate(row, mapDomain, req.user.id);
     return res.json(mapped);
   } catch (err) {
     next(err);

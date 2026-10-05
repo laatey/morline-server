@@ -4,6 +4,7 @@ import { execute, queryOne, queryAll, transaction } from '../db/index.js';
 import { mapProject, mapEnvironment } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound, forbidden, validationError } from '../middleware/error-handler.js';
+import { projectUsage, RATES } from '../engine/usage-meter.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -159,14 +160,8 @@ router.get('/:projectId/usage', (req, res) => {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
   const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString();
 
-  const services = queryAll(`
-    SELECT s.id FROM services s
-    JOIN environments e ON e.id = s.environment_id
-    WHERE e.project_id = ?
-  `, project.id);
-
-  const spentUsd = parseFloat((services.length * 2.50).toFixed(2));
-  const estimatedUsd = parseFloat((services.length * 7.50).toFixed(2));
+  // Measured, usage-based cost for the calendar month (see engine/usage-meter.js).
+  const { spentUsd, estimatedUsd, breakdown, services } = projectUsage(project.id, now);
   const limitUsd = project.settings_spend_limit_usd || null;
   const limitReached = limitUsd !== null ? spentUsd >= limitUsd : false;
 
@@ -176,7 +171,10 @@ router.get('/:projectId/usage', (req, res) => {
     spentUsd,
     estimatedUsd,
     limitUsd,
-    limitReached
+    limitReached,
+    breakdown,
+    services,
+    rates: RATES
   });
 });
 

@@ -48,6 +48,7 @@ tags:
   - name: Assistant
   - name: Activity
   - name: Notifications
+  - name: Databases
   - name: Search
 
 paths:
@@ -611,6 +612,18 @@ paths:
                   estimatedUsd: { type: number }
                   limitUsd: { type: [number, "null"] }
                   limitReached: { type: boolean }
+                  breakdown:
+                    type: object
+                    description: Cost this month by resource
+                    properties:
+                      cpuUsd: { type: number }
+                      memoryUsd: { type: number }
+                      volumeUsd: { type: number }
+                      egressUsd: { type: number }
+                  services:
+                    type: array
+                    items: { type: object, properties: { id: { type: string }, name: { type: string }, spentUsd: { type: number } } }
+                  rates: { type: object, additionalProperties: { type: number }, description: Prices in use }
 
   # ───────────────────────────── ENVIRONMENTS ─────────────────────────────
   /projects/{projectId}/environments:
@@ -878,6 +891,33 @@ paths:
         "202": { description: Restarting, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } }
         "409": { description: No active deployment, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
+  /services/{serviceId}/stop:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Services]
+      summary: Stop the service (keeps every setting; restart, wake or a new deployment starts it again)
+      description: |
+        Cancels any build in progress, stops the running container, sets `replicas` to 0 and `status` to `stopped`.
+        The active deployment becomes `removed`. Variables, domains, volumes and settings are untouched.
+        Stopping an already stopped service returns it unchanged.
+      responses:
+        "200": { description: Stopped, content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } }
+        "409": { description: Never deployed (`code=not_deployed`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /services/{serviceId}/directories:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Services]
+      summary: Folders of the service's GitHub repository (Root directory picker)
+      description: |
+        Works before the first deploy. Lists every top-level folder plus nested folders (up to 4 deep) that contain a
+        project manifest such as `package.json`. Services without a repository return `["/"]`.
+      responses:
+        "200":
+          description: Directory paths, each starting with `/`
+          content: { application/json: { schema: { type: array, items: { type: string }, example: ["/", "/api", "/packages/ui"] } } }
+        "502": { description: The repository could not be read (`code=repository_unavailable`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
   /services/{serviceId}/sleep:
     parameters: [{ $ref: "#/components/parameters/serviceId" }]
     post:
@@ -1079,6 +1119,46 @@ paths:
       responses:
         "200": { description: Cancelled, content: { application/json: { schema: { $ref: "#/components/schemas/Deployment" } } } }
         "409": { description: Already finished, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/diagnosis:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    get:
+      tags: [Deployments]
+      summary: AI crash analysis for a deployment
+      responses:
+        "200": { description: Diagnosis, content: { application/json: { schema: { $ref: "#/components/schemas/Diagnosis" } } } }
+        "404": { description: No analysis has been started (`code=diagnosis_not_found`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    post:
+      tags: [Deployments]
+      summary: Start the analysis (poll the GET every 2s until `status` is `completed` or `failed`)
+      description: Returns the running analysis if one is already in progress. Calling it again after it finished starts a fresh analysis.
+      responses:
+        "202": { description: Started, content: { application/json: { schema: { $ref: "#/components/schemas/Diagnosis" } } } }
+        "409": { description: Deployment is still building, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/diagnosis/pull-request:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    post:
+      tags: [Deployments]
+      summary: Open a GitHub pull request with the suggested fix
+      description: |
+        Uses the user's GitHub connection. Needs write access to Contents and Pull requests. Calling it again returns the same pull request.
+        Fails with `stale_fix` if a file changed on GitHub since the analysis, and `no_fix_available` when `canAutoFix` is false.
+      responses:
+        "200":
+          description: Pull request
+          content: { application/json: { schema: { type: object, properties: { url: { type: string, format: uri }, number: { type: integer } } } } }
+        "409": { description: No fix, stale fix, or no GitHub connection, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "502": { description: GitHub rejected the request, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /deployments/{deploymentId}/diagnosis/dismiss:
+    parameters: [{ $ref: "#/components/parameters/deploymentId" }]
+    post:
+      tags: [Deployments]
+      summary: Dismiss the analysis banner
+      responses:
+        "200": { description: Updated diagnosis, content: { application/json: { schema: { $ref: "#/components/schemas/Diagnosis" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /deployments/{deploymentId}/logs:
     parameters: [{ $ref: "#/components/parameters/deploymentId" }]
@@ -1348,6 +1428,158 @@ paths:
       summary: Re-check DNS now ("Check again")
       responses:
         "200": { description: Current verification result, content: { application/json: { schema: { $ref: "#/components/schemas/Domain" } } } }
+
+  # ───────────────────────────── STAGED CHANGES ─────────────────────────────
+  /environments/{environmentId}/staged-changes:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    get:
+      tags: [Environments]
+      summary: Changes waiting to be deployed
+      responses:
+        "200":
+          description: Staged changes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        serviceId: { type: [string, "null"] }
+                        serviceName: { type: [string, "null"] }
+                        type: { type: string }
+                        summary: { type: string }
+                        payload: { type: object, additionalProperties: true }
+                        createdAt: { type: string, format: date-time }
+    delete:
+      tags: [Environments]
+      summary: Discard all staged changes
+      responses: { "204": { description: Discarded } }
+  /environments/{environmentId}/staged-changes/deploy:
+    parameters: [{ $ref: "#/components/parameters/environmentId" }]
+    post:
+      tags: [Environments]
+      summary: Deploy all staged changes
+      responses: { "202": { description: Deploying } }
+
+  # ───────────────────────────── VARIABLE SUGGESTIONS ─────────────────────────────
+  /services/{serviceId}/variables/suggestions:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Variables]
+      summary: Variables suggested from the repository's `.env.example` (looks in the root directory first)
+      responses:
+        "200":
+          description: Suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        value: { type: string }
+                        secret: { type: boolean }
+                        source: { type: string }
+  /services/{serviceId}/variables/suggestions/dismiss:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    post:
+      tags: [Variables]
+      summary: Hide suggestions
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { keys: { type: array, items: { type: string } } } } } }
+      responses: { "204": { description: Dismissed } }
+
+  # ───────────────────────────── DATABASES & BACKUPS ─────────────────────────────
+  /services/{serviceId}/database/collections:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Databases]
+      summary: Tables, views, collections or keys of a database service
+      description: Postgres, MySQL, MongoDB, Redis and PocketBase. `size` is in bytes. The database must be running.
+      responses:
+        "200":
+          description: Collections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        count: { type: [integer, "null"] }
+                        type: { type: [string, "null"], example: table }
+                        size: { type: [integer, "null"] }
+        "409": { description: Not a database, or not running (`database_not_running`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /services/{serviceId}/database/collections/{name}:
+    parameters:
+      - { $ref: "#/components/parameters/serviceId" }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Databases]
+      summary: Rows of one collection
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: Rows, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { type: object, additionalProperties: true } } } } } } }
+        "404": { description: Unknown collection, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /services/{serviceId}/database/connection:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Databases]
+      summary: Connection details (private network; `publicUrl` is always null today)
+      responses:
+        "200":
+          description: Connection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: [string, "null"] }
+                  port: { type: [integer, "null"] }
+                  user: { type: [string, "null"] }
+                  password: { type: [string, "null"] }
+                  database: { type: [string, "null"] }
+                  url: { type: [string, "null"] }
+                  publicUrl: { type: [string, "null"] }
+  /services/{serviceId}/backups:
+    parameters: [{ $ref: "#/components/parameters/serviceId" }]
+    get:
+      tags: [Databases]
+      summary: Backups, newest first (the latest 20 are kept)
+      responses:
+        "200": { description: Backups, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } } } }
+    post:
+      tags: [Databases]
+      summary: Create a backup (runs in the background; poll the list)
+      responses:
+        "202": { description: Started, content: { application/json: { schema: { $ref: "#/components/schemas/Backup" } } } }
+        "409": { description: Another backup or restore is running (`backup_in_progress`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /services/{serviceId}/backups/{backupId}/restore:
+    parameters:
+      - { $ref: "#/components/parameters/serviceId" }
+      - { name: backupId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Databases]
+      summary: Restore a backup (a `pre-restore` backup is taken first)
+      description: Supported for Postgres, MySQL and MongoDB. Redis and PocketBase return 409 `restore_unsupported`.
+      responses:
+        "202": { description: Restoring (poll the backup's `restore` field), content: { application/json: { schema: { type: object, properties: { status: { type: string }, backupId: { type: string } } } } } }
+        "409": { description: Unavailable or unsupported, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   # ───────────────────────────── GITHUB ─────────────────────────────
   /integrations/github:
@@ -1856,6 +2088,8 @@ components:
       properties:
         user: { $ref: "#/components/schemas/User" }
         session: { $ref: "#/components/schemas/Session" }
+        teams: { type: array, items: { $ref: "#/components/schemas/Team" }, description: The user's workspaces }
+        defaultTeamId: { type: [string, "null"] }
     SessionInfo:
       type: object
       properties:
@@ -2049,7 +2283,7 @@ components:
       type: string
       enum: [docker, github, go, js, metabase, mongodb, mysql, n8n, nextjs, postgres, python, redis, rust, sqlite, strapi, vite]
     ServiceKind: { type: string, enum: [app, database, worker, cron] }
-    ServiceStatus: { type: string, enum: [online, deploying, crashed, sleeping, queued, removed] }
+    ServiceStatus: { type: string, enum: [created, queued, deploying, online, crashed, sleeping, stopped, removed], description: "`created` = never deployed" }
     Position:
       type: object
       required: [x, y]
@@ -2098,6 +2332,8 @@ components:
         replicas: { type: integer, minimum: 0 }
         port: { type: [integer, "null"] }
         primaryDomain: { type: [string, "null"] }
+        framework: { type: [string, "null"], example: nextjs, description: Detected at build time (nextjs, react, vue, django, fastapi, express...) }
+        runtime: { type: [string, "null"], example: node, description: Detected at build time (node, bun, python, go, rust, java, ruby, php, docker...) }
         volume:
           type: [object, "null"]
           properties:
@@ -2151,6 +2387,7 @@ components:
       properties:
         branch: { type: string }
         rootDirectory: { type: string }
+        basePath: { type: [string, "null"] }
         autoDeploy: { type: boolean, description: Deploy on every push }
         buildCommand: { type: [string, "null"] }
         startCommand: { type: [string, "null"] }
@@ -2167,6 +2404,9 @@ components:
     CreateServiceInput:
       type: object
       required: [source]
+      description: |
+        `source` may be `{ type: github, url: "https://github.com/owner/repo" }`, optionally ending in `/tree/<branch>/<folder>`
+        (branch and root directory are filled in from it). A pasted URL needs no GitHub connection.
       properties:
         name: { type: string, description: Defaults from template/repo }
         templateId: { type: string }
@@ -2270,6 +2510,71 @@ components:
                   startedAt: { type: [string, "null"], format: date-time }
                   finishedAt: { type: [string, "null"], format: date-time }
             url: { type: [string, "null"], description: Deployment-specific URL }
+            variables:
+              type: array
+              description: Variables used at deploy time. Secret values are never returned.
+              items:
+                type: object
+                properties:
+                  key: { type: string }
+                  value: { type: string }
+                  secret: { type: boolean }
+            config:
+              type: [object, "null"]
+              description: Settings used at deploy time; null for deployments made before this was recorded
+              properties:
+                builder: { type: string, enum: [railpack, dockerfile, compose] }
+                installCommand: { type: [string, "null"] }
+                buildCommand: { type: [string, "null"] }
+                startCommand: { type: [string, "null"] }
+                dockerfilePath: { type: [string, "null"] }
+                rootDirectory: { type: [string, "null"] }
+                runtimeVersion: { type: [string, "null"] }
+                region: { type: [string, "null"] }
+                replicas: { type: integer }
+                targetPort: { type: integer }
+                healthcheckPath: { type: string }
+                healthcheckTimeoutSec: { type: integer }
+                restartPolicy: { type: string }
+            source:
+              type: [object, "null"]
+              properties:
+                type: { type: string, example: github }
+                repo: { type: string, example: owner/repo }
+                branch: { type: [string, "null"] }
+    Diagnosis:
+      type: object
+      properties:
+        status: { type: string, enum: [pending, running, completed, failed] }
+        summary: { type: [string, "null"] }
+        rootCause: { type: [string, "null"] }
+        suggestedFix: { type: [string, "null"] }
+        canAutoFix: { type: boolean }
+        fix:
+          type: [object, "null"]
+          properties:
+            title: { type: string }
+            files:
+              type: array
+              items: { type: object, properties: { path: { type: string }, diff: { type: string, description: Unified diff } } }
+        pullRequest: { type: [object, "null"], properties: { url: { type: string }, number: { type: integer } } }
+        dismissed: { type: boolean }
+        error: { type: string, description: Present when `status` is failed }
+    Backup:
+      type: object
+      properties:
+        id: { type: string }
+        createdAt: { type: string, format: date-time }
+        size: { type: [integer, "null"], description: Bytes }
+        status: { type: string, enum: [pending, running, completed, failed] }
+        kind: { type: string, enum: [manual, scheduled, pre-restore] }
+        error: { type: string }
+        restore:
+          type: [object, "null"]
+          properties:
+            status: { type: string, enum: [running, completed, failed] }
+            at: { type: [string, "null"], format: date-time }
+            error: { type: string }
     DeploymentPage:
       type: object
       required: [data, nextCursor]
@@ -2289,8 +2594,13 @@ components:
         serviceName: { type: string }
         deploymentId: { type: [string, "null"] }
         replica: { type: [string, "null"] }
+        replicaId: { type: [string, "null"] }
+        phase: { type: [string, "null"], enum: [build, deploy, null] }
+        source: { type: [string, "null"], enum: [build, platform, container, null], description: "build = builder output, platform = Morline messages, container = the app's own output" }
+        container: { type: [string, "null"] }
+        stream: { type: [string, "null"], enum: [stdout, stderr, null] }
         level: { $ref: "#/components/schemas/LogLevel" }
-        message: { type: string }
+        message: { type: string, description: Full line, untrimmed (indentation kept) }
         attributes: { type: object, additionalProperties: true }
     LogPage:
       type: object
@@ -2354,7 +2664,7 @@ components:
         tls:
           type: object
           properties:
-            status: { type: string, enum: [managed, issuing, valid, expiring, failed] }
+            status: { type: string, enum: [managed, pending, issuing, valid, expiring, failed] }
             expiresAt: { type: [string, "null"], format: date-time }
             label: { type: string, example: "Valid · renews in 61d" }
         dnsRecords:
@@ -2367,6 +2677,8 @@ components:
               name: { type: string }
               value: { type: string }
               verified: { type: boolean }
+              purpose: { type: string }
+              optional: { type: boolean, description: "Alternative record (the A record, for root domains)" }
         lastCheckedAt: { type: [string, "null"], format: date-time }
         error: { type: [string, "null"] }
     Networking:

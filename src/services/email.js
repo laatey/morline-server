@@ -112,3 +112,17 @@ export async function sendTeamInviteEmail({ to, inviterName, teamName, role, tok
     </body></html>`
   });
 }
+
+// ─── Generic notification email ────────────────────────────
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+export async function sendNotificationEmail({ to, name, title, body, url }) {
+  return send({
+    to,
+    subject: title,
+    html: `<!doctype html><html><head>${baseStyle}</head><body><div class="card"><div class="logo">Morline</div>
+      <h1>${esc(title)}</h1><p>Hi ${esc(name || 'there')},</p><p>${esc(body)}</p>
+      ${url ? `<a class="btn" href="${esc(url)}">Open in Morline</a>` : ''}
+      <hr class="divider"><p class="footer">You get these emails because email notifications are on. Turn them off in your settings.</p></div></body></html>`
+  });
+}

@@ -54,8 +54,16 @@ export function authenticate(req, res, next) {
   let session = null;
   if (decoded.sessionId) {
     session = queryOne('SELECT * FROM sessions WHERE id = ? AND user_id = ?', decoded.sessionId, user.id);
-    if (session) {
-      execute('UPDATE sessions SET last_active_at = ? WHERE id = ?', new Date().toISOString(), session.id);
+    // A token is only as good as its session: once the device is signed out or revoked, or the
+    // session has expired, the still-unexpired access token must stop working.
+    if (!session || new Date(session.expires_at) < new Date()) {
+      req.user = null;
+      req.session = null;
+      return next();
+    }
+    const now = Date.now();
+    if (now - Date.parse(session.last_active_at) > 60_000) { // no need to write on every request
+      execute('UPDATE sessions SET last_active_at = ? WHERE id = ?', new Date(now).toISOString(), session.id);
     }
   }
 

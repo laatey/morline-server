@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -52,6 +53,20 @@ function applyMigrations(db) {
       ELSE 'deploy' END WHERE phase IS NULL;`);
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_logs_deploy_phase ON deployment_logs(deployment_id, phase);');
+
+  // Custom domains: ownership proof and real certificate tracking
+  const domainCols = db.prepare('PRAGMA table_info(domains);').all().map(c => c.name);
+  if (!domainCols.includes('verification_token')) {
+    db.exec('ALTER TABLE domains ADD COLUMN verification_token TEXT;');
+    db.exec('ALTER TABLE domains ADD COLUMN verified_at TEXT;');
+    db.exec('ALTER TABLE domains ADD COLUMN tls_expires_at TEXT;');
+    // Domains that were already live keep working (treated as verified); the rest get a token to prove.
+    db.exec("UPDATE domains SET verified_at = created_at WHERE kind = 'custom' AND status = 'active';");
+    db.exec("UPDATE domains SET tls_configured = 0 WHERE kind = 'custom';");
+    for (const row of db.prepare("SELECT id FROM domains WHERE kind = 'custom' AND verification_token IS NULL").all()) {
+      db.prepare('UPDATE domains SET verification_token = ? WHERE id = ?').run(crypto.randomBytes(16).toString('hex'), row.id);
+    }
+  }
 
   // Service app type, stop support, and the "created" status for never-deployed services
   const serviceCols = db.prepare('PRAGMA table_info(services);').all().map(c => c.name);

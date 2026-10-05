@@ -1,0 +1,30 @@
+# Optional edge proxy for HTTPS on custom domains. Use together with the main compose file:
+#   docker compose -f docker-compose.production.yml -f edge/docker-compose.edge.yml up -d --build
+# Read edge/README.md first: it needs ports 80 and 443 and changes how morline-api is exposed.
+services:
+  edge:
+    image: caddy:2
+    container_name: morline-edge
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL for certificate expiry notices}
+      EDGE_SECRET: ${EDGE_SECRET:?Set EDGE_SECRET (any long random string, also set in /etc/morline/morline.env)}
+    volumes:
+      - ./edge/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - morline-runtime
+    depends_on:
+      - morline-api
+
+  morline-api:
+    # Caddy now owns ports 80/443, so the API is only reachable inside the Docker network.
+    ports: !override []
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -166,6 +166,8 @@ router.put('/password', async (req, res, next) => {
 
     const newHash = await bcrypt.hash(newPassword, 10);
     execute('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', newHash, new Date().toISOString(), req.user.id);
+    // Changing the password signs out every other device, keeping this one.
+    execute('DELETE FROM sessions WHERE user_id = ? AND id != ?', req.user.id, req.session?.id || '');
     return res.status(204).end();
   } catch (err) {
     next(err);

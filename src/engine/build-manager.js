@@ -16,6 +16,7 @@ import {
 import { resolveRuntime } from './runtime-resolver.js';
 import { saveAppType } from './app-type.js';
 import { reviveFromStop } from './service-lifecycle.js';
+import { notify, recipientsForDeployment, projectLink } from '../services/notifications.js';
 
 const { queryOne, execute } = dbModule;
 
@@ -781,8 +782,20 @@ server.listen(port, '0.0.0.0', () => {
       // A superseded build must not touch service status: a newer deployment now owns it.
       if (run.superseded) return;
 
-      execute('UPDATE services SET status = ?, building_deployment_id = NULL WHERE id = ?', 'crashed', serviceId);
-      ctx.emit('service.status', { id: serviceId, status: 'crashed' });
+      // A failed new build must not take down a version that is still serving traffic.
+      const stillServing = containerSupervisor.isServiceRunning(serviceId);
+      const status = stillServing ? 'online' : 'crashed';
+      execute('UPDATE services SET status = ?, building_deployment_id = NULL WHERE id = ?', status, serviceId);
+      ctx.emit('service.status', { id: serviceId, status });
+
+      if (!run.cancelled) {
+        const { users, projectId } = recipientsForDeployment(deploymentId);
+        const name = queryOne('SELECT name FROM services WHERE id = ?', serviceId)?.name || 'Your service';
+        notify(users, {
+          type: 'deploy_failed', title: `Deployment of ${name} failed`,
+          body: summary.slice(0, 300), projectId, targetUrl: projectLink(projectId)
+        });
+      }
     } catch (dbErr) {
       console.error('[BuildManager] Failed to record build failure:', dbErr);
     }

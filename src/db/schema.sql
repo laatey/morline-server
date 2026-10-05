@@ -238,6 +238,9 @@ CREATE TABLE IF NOT EXISTS domains (
   target_port INTEGER,
   tls_configured INTEGER NOT NULL DEFAULT 1,
   dns_records TEXT, -- JSON array of records
+  verification_token TEXT, -- custom domains: value of the _morline-challenge TXT record
+  verified_at TEXT, -- when ownership was proven
+  tls_expires_at TEXT, -- expiry of the certificate actually being served
   last_checked_at TEXT,
   error TEXT,
   created_at TEXT NOT NULL
@@ -448,3 +451,15 @@ CREATE INDEX IF NOT EXISTS idx_connections_env ON connections(environment_id);
 CREATE INDEX IF NOT EXISTS idx_activity_project ON activity(project_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_assistant_messages_thread ON assistant_messages(thread_id);
+
+-- Metered usage, one row per service per month. Filled once a minute by engine/usage-meter.js.
+CREATE TABLE IF NOT EXISTS usage_monthly (
+  service_id TEXT NOT NULL,
+  month TEXT NOT NULL, -- 'YYYY-MM' (UTC)
+  cpu_seconds REAL NOT NULL DEFAULT 0, -- vCPU-seconds actually used
+  memory_gb_seconds REAL NOT NULL DEFAULT 0, -- GB-seconds actually used
+  volume_gb_seconds REAL NOT NULL DEFAULT 0, -- GB-seconds of stored volume data
+  egress_bytes INTEGER NOT NULL DEFAULT 0, -- bytes sent to visitors
+  requests INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (service_id, month)
+);

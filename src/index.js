@@ -5,6 +5,10 @@ import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
 import { initDb } from './db/index.js';
 import { backfillAppTypes } from './engine/app-type.js';
 import { recoverBackups } from './engine/database-manager.js';
+import { startMetering, flushMetering } from './engine/usage-meter.js';
+import internalRouter from './routes/internal.js';
+import { startDomainChecks, emitDomainUpdate } from './engine/domain-manager.js';
+import { mapDomain } from './db/mappers.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -31,10 +35,16 @@ import templatesRouter from './routes/templates.js';
 
 // Initialize Database & Seeds
 initDb();
+startMetering();
+containerSupervisor.startWatchdog();
+startDomainChecks((row) => emitDomainUpdate(row, mapDomain));
 try { recoverBackups(); } catch (err) { console.warn('[Backup] Recovery skipped:', err.message); }
 try { backfillAppTypes(); } catch (err) { console.warn('[AppType] Backfill skipped:', err.message); }
 
 const app = express();
+// Behind the AWS load balancer / Caddy the socket address is always a private one, which made every
+// session show 127.0.0.1. Trust X-Forwarded-For only when it comes from a private-network proxy.
+app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 
 const allowedOrigins = new Set(
   [FRONTEND_URL, ...(process.env.CORS_ORIGINS || '').split(',')]
@@ -206,6 +216,7 @@ v1.use('/connections', connectionsRouter);
 v1.use('/', servicesRouter);
 v1.use('/deployments', deploymentsRouter);
 v1.use('/domains', domainsRouter);
+v1.use('/', internalRouter);
 v1.use('/notifications', notificationsRouter);
 v1.use('/', activityRouter);
 v1.use('/search', searchRouter);
@@ -245,6 +256,7 @@ const server = app.listen(PORT, HOST, async () => {
 // Graceful Shutdown
 function handleShutdown(signal) {
   console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+  try { flushMetering(); } catch { /* best effort */ }
   tunnelManager.stop();
   server.close(async () => {
     // Terminate any active child processes

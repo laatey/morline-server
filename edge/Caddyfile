@@ -1,0 +1,25 @@
+# Edge proxy: terminates HTTPS for *.{$BASE_DOMAIN} and for customers' custom domains, then forwards to Morline.
+# Certificates are issued on demand, and only for hostnames Morline says are legitimate (see `ask`).
+{
+	email {$ACME_EMAIL}
+	on_demand_tls {
+		ask http://morline-api:3001/v1/internal/tls-allow?secret={$EDGE_SECRET}
+	}
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	reverse_proxy morline-api:3001 {
+		# The app uses these for logs and for the real visitor address.
+		header_up X-Forwarded-Proto https
+		flush_interval -1
+	}
+}
+
+# Plain HTTP: certificate challenges are answered by Caddy itself, everything else is sent to HTTPS.
+http:// {
+	redir https://{host}{uri} permanent
+}

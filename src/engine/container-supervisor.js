@@ -10,6 +10,7 @@ import { APPS_DIR, DATA_DIR } from '../config.js';
 import { execute, queryAll, queryOne } from '../db/index.js';
 import { logManager } from './log-manager.js';
 import { eventBus } from './event-bus.js';
+import { notify, recipientsForDeployment, projectOfEnvironment, adminsOfProject, projectLink } from '../services/notifications.js';
 
 const NETWORK = 'morline-runtime';
 const safeName = (value) => String(value).toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
@@ -420,10 +421,49 @@ export class ContainerSupervisor {
     setTimeout(check, 500);
   }
 
+  // After a service is up, notice when its container later dies (and when it comes back).
+  startWatchdog() {
+    if (this.watchdog) return;
+    this.watchdog = setInterval(() => this.checkRunning().catch((err) => console.warn('[Watchdog]', err.message)), 30_000);
+    this.watchdog.unref();
+  }
+
+  async checkRunning() {
+    for (const [serviceId, info] of this.processes) {
+      if (info.kind === 'compose') continue;
+      const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
+      if (!service) continue;
+      const state = await this.containerState(info.name);
+      if (!state) continue;
+      const at = new Date().toISOString();
+      const emit = (type, data) => eventBus.emitEnvironmentEvent(service.environment_id, { type, at, actorId: null, canvasRevision: null, data });
+
+      if ((state.status === 'exited' || state.status === 'dead') && service.status === 'online') {
+        execute("UPDATE services SET status = 'crashed' WHERE id = ?", serviceId);
+        execute("UPDATE deployments SET state = 'crashed' WHERE id = ? AND state = 'active'", info.deploymentId);
+        this.log(service, info, 'error', `[Deploy] The container stopped unexpectedly (exit code ${state.exitCode})`);
+        emit('deployment.updated', { id: info.deploymentId, state: 'crashed' });
+        emit('service.status', { id: serviceId, status: 'crashed' });
+        const projectId = projectOfEnvironment(service.environment_id);
+        notify(projectId ? adminsOfProject(projectId) : [], {
+          type: 'service_crashed', title: `${service.name} crashed`,
+          body: `The service stopped unexpectedly (exit code ${state.exitCode}). Open it to see the logs.`,
+          projectId, targetUrl: projectLink(projectId), dedupeKey: new Date(Date.now() - 3600_000).toISOString()
+        });
+      } else if (state.status === 'running' && service.status === 'crashed' && service.active_deployment_id === info.deploymentId) {
+        execute("UPDATE services SET status = 'online' WHERE id = ?", serviceId);
+        execute("UPDATE deployments SET state = 'active' WHERE id = ? AND state = 'crashed'", info.deploymentId);
+        emit('deployment.updated', { id: info.deploymentId, state: 'active' });
+        emit('service.status', { id: serviceId, status: 'online' });
+      }
+    }
+  }
+
   markHealthy(serviceId, deploymentId, note = null, level = 'info') {
     const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
     const deployment = queryOne('SELECT state FROM deployments WHERE id = ?', deploymentId);
     if (!service || !deployment || !['deploying', 'active'].includes(deployment.state)) return;
+    const firstTime = deployment.state === 'deploying';
     const at = new Date().toISOString();
     execute('UPDATE services SET status = ?, active_deployment_id = ?, building_deployment_id = NULL WHERE id = ?', 'online', deploymentId, serviceId);
     execute('UPDATE deployments SET state = ?, finished_at = ? WHERE id = ?', 'active', at, deploymentId);
@@ -435,6 +475,12 @@ export class ContainerSupervisor {
     }
     const info = this.processes.get(serviceId);
     if (note && info) this.log(service, info, level, `[Deploy] ${note}`);
+    if (firstTime) {
+      // Only the person who triggered it hears about a success; automatic redeploys stay quiet.
+      const creator = queryOne('SELECT created_by FROM deployments WHERE id = ?', deploymentId)?.created_by;
+      const projectId = projectOfEnvironment(service.environment_id);
+      if (creator) notify(creator, { type: 'deploy_succeeded', title: `${service.name} is live`, body: 'Your deployment finished and is serving traffic.', projectId, targetUrl: projectLink(projectId) });
+    }
     // The UI tracks deployment progress from deployment.updated events. Emitting only
     // service.status left the deployment card on "deploying" until a manual refresh.
     eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: deploymentId, state: 'active' } });
@@ -450,6 +496,8 @@ export class ContainerSupervisor {
     execute('UPDATE services SET status = ?, building_deployment_id = NULL WHERE id = ?', 'crashed', serviceId);
     const info = this.processes.get(serviceId);
     if (info) this.log(service, info, 'error', `[Deploy] ${summary}`);
+    const { users, projectId } = recipientsForDeployment(deploymentId);
+    notify(users, { type: 'deploy_failed', title: `Deployment of ${service.name} failed`, body: summary.slice(0, 300), projectId, targetUrl: projectLink(projectId) });
     eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: deploymentId, state: 'failed', errorSummary: summary } });
     eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at, actorId: null, canvasRevision: null, data: { id: serviceId, status: 'crashed' } });
   }

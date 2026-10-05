@@ -1,3 +1,4 @@
+import { liveUsage } from '../engine/usage-meter.js';
 export function mapUser(row) {
   if (!row) return null;
   return {
@@ -185,7 +186,7 @@ export function mapService(row, extra = {}) {
     port: row.port !== null && row.port !== undefined ? Number(row.port) : null,
     primaryDomain: row.primary_domain || null,
     volume: extra.volume || null,
-    usage: extra.usage || {
+    usage: extra.usage || liveUsage(row.id) || {
       cpuPercent: 0,
       memoryMb: 0,
       memoryLimitMb: extra.memoryLimitMb || 512,
@@ -263,6 +264,19 @@ export function mapVariable(row) {
   };
 }
 
+function tlsState(row) {
+  if (row.kind !== 'custom') {
+    // Generated hosts sit under Morline's own certificate.
+    return { status: 'valid', label: 'Managed by Morline', expiresAt: null };
+  }
+  if (row.tls_configured && row.tls_expires_at) {
+    const days = Math.max(Math.floor((Date.parse(row.tls_expires_at) - Date.now()) / 86400000), 0);
+    return { status: 'valid', label: `Valid · renews in ${days}d`, expiresAt: row.tls_expires_at };
+  }
+  const waiting = row.status === 'active';
+  return { status: waiting ? 'issuing' : 'pending', label: waiting ? 'Issuing certificate' : 'Waiting for DNS', expiresAt: null };
+}
+
 export function mapDomain(row) {
   if (!row) return null;
   let dnsRecords = [];
@@ -278,13 +292,9 @@ export function mapDomain(row) {
     kind: row.kind === 'custom' ? 'custom' : 'generated',
     status: row.status || 'active',
     targetPort: row.target_port !== null && row.target_port !== undefined ? Number(row.target_port) : null,
-    tls: {
-      status: row.tls_configured ? 'valid' : 'issuing',
-      label: row.tls_configured ? 'Valid · renews in 90d' : 'Issuing certificate',
-      expiresAt: new Date(Date.now() + 90 * 86400000).toISOString()
-    },
+    tls: tlsState(row),
     dnsRecords,
-    lastCheckedAt: row.last_checked_at || new Date().toISOString(),
+    lastCheckedAt: row.last_checked_at || null,
     error: row.error || null
   };
 }

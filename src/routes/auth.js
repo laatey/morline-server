@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
-import { mapUser, mapSessionInfo } from '../db/mappers.js';
+import { mapUser, mapSessionInfo, mapTeam } from '../db/mappers.js';
 import { signAccessToken, requireAuth } from '../middleware/auth.js';
 import { conflict, unauthorized, notFound } from '../middleware/error-handler.js';
 import { REFRESH_EXPIRES_DAYS, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, PUBLIC_URL, FRONTEND_URL } from '../config.js';
@@ -22,13 +22,29 @@ const loginSchema = z.object({
   password: z.string()
 });
 
+// Workspaces and the default one, so the app does not need a second call right after signing in.
+function teamsFor(userId) {
+  const rows = queryAll(`
+    SELECT t.*, tm.role, (SELECT COUNT(*) FROM team_members WHERE team_id = t.id) AS member_count
+    FROM teams t JOIN team_members tm ON tm.team_id = t.id
+    WHERE tm.user_id = ? ORDER BY t.created_at ASC`, userId);
+  const teams = rows.map((t) => mapTeam(t, t.role, t.member_count));
+  const settings = queryOne('SELECT default_team_id FROM user_settings WHERE user_id = ?', userId);
+  return { teams, defaultTeamId: settings?.default_team_id || teams[0]?.id || null };
+}
+
 function createSessionRecord(userId, req) {
   const sessionId = `ses_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
   const refreshToken = `rsh_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
   const now = new Date();
   const expiresAt = new Date(now.getTime() + REFRESH_EXPIRES_DAYS * 86400000).toISOString();
-  const userAgent = req.headers['user-agent'] || 'Unknown Client';
-  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
+  const userAgent = String(req.headers['user-agent'] || 'Unknown Client').slice(0, 300);
+  const ip = String(req.ip || req.socket.remoteAddress || '127.0.0.1').replace(/^::ffff:/, '');
+
+  // Stale copies from the same browser are cleaned up so the device list does not fill with duplicates.
+  // A session used in the last day is kept: two identical devices on one network must not sign each other out.
+  execute('DELETE FROM sessions WHERE user_id = ? AND user_agent = ? AND ip = ? AND last_active_at < ?',
+    userId, userAgent, ip, new Date(Date.now() - 86400000).toISOString());
 
   execute(`
     INSERT INTO sessions (id, user_id, refresh_token, user_agent, ip, expires_at, created_at, last_active_at)
@@ -97,6 +113,7 @@ router.post('/signup', async (req, res, next) => {
 
     return res.status(201).json({
       user: mapUser(userRow),
+      ...teamsFor(userId),
       session: {
         accessToken: session.accessToken,
         refreshToken: session.refreshToken,
@@ -127,6 +144,7 @@ router.post('/login', async (req, res, next) => {
 
     return res.status(200).json({
       user: mapUser(user),
+      ...teamsFor(user.id),
       session: {
         accessToken: session.accessToken,
         refreshToken: session.refreshToken,
@@ -445,6 +463,7 @@ router.post('/password/reset', async (req, res, next) => {
     const passwordHash = await bcrypt.hash(newPassword, 10);
     execute('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', passwordHash, new Date().toISOString(), record.user_id);
     execute('DELETE FROM password_resets WHERE user_id = ?', record.user_id);
+    execute('DELETE FROM sessions WHERE user_id = ?', record.user_id); // a reset signs out every device
 
     return res.status(200).json({ reset: true });
   } catch (err) {

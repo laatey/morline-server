@@ -1,5 +1,6 @@
 import { resolveGithubSource } from '../services/github-url.js';
 import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
+import { notify } from '../services/notifications.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
@@ -12,6 +13,14 @@ import { sendTeamInviteEmail } from '../services/email.js';
 import { createStagedChange } from '../services/staged-changes-helper.js';
 
 const router = Router();
+
+function uniqueTeamSlug(name) {
+  const base = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace';
+  let slug = base;
+  for (let n = 2; queryOne('SELECT id FROM teams WHERE slug = ?', slug); n++) slug = `${base}-${n}`;
+  return slug;
+}
 
 function checkTeamRole(teamId, userId, allowedRoles = ['owner', 'admin']) {
   const member = queryOne('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?', teamId, userId);
@@ -45,10 +54,21 @@ router.post('/teams', requireAuth, (req, res, next) => {
     const { name, slug } = req.body || {};
     if (!name) throw validationError('Name is required');
 
-    const cleanSlug = (slug || name.toLowerCase().replace(/[^a-z0-9]/g, '-')).slice(0, 50);
-    const existing = queryOne('SELECT id FROM teams WHERE slug = ?', cleanSlug);
-    if (existing) {
-      throw conflict('A team with this slug already exists', 'slug_taken');
+    const cleanName = String(name).trim();
+    if (!cleanName) throw validationError('Name is required');
+    let cleanSlug;
+    if (slug) {
+      // A slug the user typed is respected, or rejected if it is invalid or taken.
+      cleanSlug = String(slug).trim().toLowerCase();
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$/.test(cleanSlug)) {
+        throw validationError('Slug may only contain lowercase letters, numbers and hyphens', { slug: 'Invalid slug' });
+      }
+      if (queryOne('SELECT id FROM teams WHERE slug = ?', cleanSlug)) {
+        throw conflict('A team with this slug already exists', 'slug_taken');
+      }
+    } else {
+      // Derived from the name, so two workspaces called "Acme" never collide: acme, acme-2, acme-3...
+      cleanSlug = uniqueTeamSlug(cleanName);
     }
 
     const teamId = `tem_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -58,12 +78,19 @@ router.post('/teams', requireAuth, (req, res, next) => {
       execute(`
         INSERT INTO teams (id, name, slug, plan, created_at, updated_at)
         VALUES (?, ?, ?, 'hobby', ?, ?)
-      `, teamId, name, cleanSlug, now, now);
+      `, teamId, cleanName, cleanSlug, now, now);
 
       execute(`
         INSERT INTO team_members (team_id, user_id, role, joined_at)
         VALUES (?, ?, 'owner', ?)
       `, teamId, req.user.id, now);
+
+      // First workspace becomes the default, so the app always has one to open.
+      execute(`
+        INSERT INTO user_settings (user_id, theme, default_team_id, canvas_snap_to_grid, timezone, email_notifications)
+        VALUES (?, 'system', ?, 1, 'UTC', 1)
+        ON CONFLICT(user_id) DO UPDATE SET default_team_id = COALESCE(user_settings.default_team_id, excluded.default_team_id)
+      `, req.user.id, teamId);
     });
 
     const teamRow = queryOne('SELECT * FROM teams WHERE id = ?', teamId);
@@ -184,6 +211,13 @@ router.post('/teams/:teamId/invites', requireAuth, (req, res, next) => {
     `, inviteId, teamId, email.toLowerCase(), role, token, req.user.id, expiresAt, now.toISOString());
 
     const team = queryOne('SELECT name FROM teams WHERE id = ?', teamId);
+
+    // Someone who already has an account also gets it in their inbox.
+    const invitee = queryOne('SELECT id FROM users WHERE email = ?', email.toLowerCase());
+    if (invitee) {
+      notify(invitee.id, { type: 'invite', title: `${req.user.name || 'Someone'} invited you to ${team?.name || 'a workspace'}`,
+        body: `You were invited as ${role}. Accept to join the workspace.`, targetUrl: `/invite?token=${token}` });
+    }
 
     // Send invite email (non-blocking)
     sendTeamInviteEmail({
