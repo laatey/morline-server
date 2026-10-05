@@ -463,3 +463,13 @@ CREATE TABLE IF NOT EXISTS usage_monthly (
   requests INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (service_id, month)
 );
+
+-- One private Docker network per environment, so "<service>.morline.internal" only ever resolves
+-- to a container in the same environment.
+CREATE TABLE IF NOT EXISTS private_networks (
+  environment_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  idx INTEGER NOT NULL UNIQUE, -- which /26 of the pool this network uses
+  subnet TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);

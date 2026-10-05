@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { execute, queryOne, queryAll } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { buildManager } from '../engine/build-manager.js';
+import { privateHostname } from '../engine/private-network.js';
 
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
@@ -128,10 +129,10 @@ router.delete('/', (req, res, next) => {
               VALUES (?, ?, ?, ?, 'http', 3000, 'http :3000', ?)
             `, connId, envId, payload.fromServiceId, payload.toServiceId, now);
 
-            const toSrv = queryOne('SELECT name FROM services WHERE id = ?', payload.toServiceId);
+            const toSrv = queryOne('SELECT * FROM services WHERE id = ?', payload.toServiceId);
             if (toSrv) {
               const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
-              const val = `http://${toSrv.name}.morline.internal:3000`;
+              const val = `http://${privateHostname(toSrv)}:3000`;
               execute(`
                 INSERT INTO variables (id, scope_type, scope_id, key, value, secret, is_reference, source, created_at, updated_at)
                 VALUES (?, 'service', ?, ?, ?, 0, 1, ?, ?, ?)

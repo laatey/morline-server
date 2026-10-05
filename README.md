@@ -131,3 +131,21 @@ node test-sse.js
 | **Assistant** | `/v1/assistant` | AI assistant conversation threads, streaming SSE message generation, action proposal & apply/revert |
 | **GitHub** | `/v1/integrations/github` | Team GitHub connection status, repo listing, branch detection, framework auto-detection |
 | **Templates** | `/v1/templates`, `/v1/regions` | Catalogues for starters (Next.js, Vite, Python FastAPI, Go, Rust, Express) and databases (Postgres, Redis, MySQL, MongoDB, SQLite) |
+
+## Networking: private names and public TCP
+
+**Private names.** Every service is reachable from the other services of its environment as
+`<service-name>.morline.internal`. Each environment gets its own Docker network (`morline-env-<id>`, a /26 taken from
+`PRIVATE_NET_POOL`, default `10.200.0.0/16`), so the same name in two projects never mixes them up. If two services in one
+environment share a name, the older keeps `name.morline.internal` and the newer gets `name-<4 chars of its id>`.
+Containers also stay on the shared `morline-runtime` network so the reverse proxy can reach them.
+
+**Public TCP (databases etc.).** A service can be given a public port from `TCP_PROXY_PORTS` (default `30000-30999`),
+published by Docker straight from its container. For this to work on AWS:
+
+- allow inbound TCP `30000-30999` in the instance's security group;
+- `PUBLIC_TCP_HOST` (default `edge.<BASE_DOMAIN>`) must resolve to the instance's public IP;
+- the connection is plain TCP (no TLS), so rely on the generated password.
+
+**Restarts.** Customer containers are no longer stopped when Morline stops. After Morline starts it adopts the containers
+that are still running and starts any that are missing. Set `STOP_SERVICES_ON_EXIT=1` to get the old behaviour on a dev machine.

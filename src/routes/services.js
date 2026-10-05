@@ -10,10 +10,12 @@ import { buildManager } from '../engine/build-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { eventBus } from '../engine/event-bus.js';
 import { reviveFromStop } from '../engine/service-lifecycle.js';
+import { privateHostname } from '../engine/private-network.js';
+import { tcpProxyInfo, enableTcpProxy, disableTcpProxy } from '../engine/public-tcp.js';
 import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
 import { normalizeHost, hostProblem, newToken, dnsRecordsFor } from '../engine/domain-manager.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
-import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore } from '../engine/database-manager.js';
+import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
 import { APPS_DIR } from '../config.js';
 import { AppError } from '../middleware/error-handler.js';
 import { BASE_DOMAIN } from '../config.js';
@@ -59,7 +61,7 @@ function getServiceDetail(service) {
   });
 
   const topology = {
-    privateEndpoint: `${service.name}.morline.internal:${networking?.target_port || service.port || 3000}`,
+    privateEndpoint: `${privateHostname(service)}:${networking?.target_port || service.port || 3000}`,
     publicEndpoints: domains.map(d => `https://${d.host}`),
     dependencies: deps.map(d => ({ id: d.id, name: d.name, logo: d.logo, status: d.status, via: d.via })),
     consumers: consumers.map(c => ({ id: c.id, name: c.name, logo: c.logo, status: c.status, via: c.via }))
@@ -123,6 +125,8 @@ router.patch('/services/:serviceId', (req, res, next) => {
       params.push(new Date().toISOString());
       params.push(service.id);
       execute(`UPDATE services SET ${updates.join(', ')} WHERE id = ?`, ...params);
+      // The private DNS name follows the service name, so a running container needs its alias updated.
+      if (name && name !== service.name) containerSupervisor.refreshPrivateAlias(service.id).catch(() => {});
     }
 
     if (settings) {
@@ -441,47 +445,72 @@ router.get('/services/:serviceId/networking', (req, res) => {
   const net = queryOne('SELECT * FROM service_networking WHERE service_id = ?', service.id);
   const domainRows = queryAll('SELECT * FROM domains WHERE service_id = ?', service.id);
 
-  return res.json({
+  return res.json(networkingResponse(service, net, domainRows));
+});
+
+function networkingResponse(service, net, domainRows, extra = {}) {
+  return {
     public: net ? Boolean(net.public) : true,
     targetPort: net?.target_port || service.port || 3000,
     domains: domainRows.map(mapDomain),
-    privateHostname: `${service.name}.morline.internal`,
-    privatePort: net?.private_port || service.port || 3000
-  });
-});
+    // Reachable from the other services of the same environment only.
+    privateHostname: privateHostname(service),
+    privatePort: net?.target_port || service.port || 3000,
+    // Reachable from anywhere over plain TCP (databases, Redis...). Off until the user turns it on.
+    tcpProxy: tcpProxyInfo(net),
+    ...extra
+  };
+}
 
 // PATCH /services/:serviceId/networking
-router.patch('/services/:serviceId/networking', (req, res) => {
-  const service = getService(req.params.serviceId);
-  const { targetPort, public: isPublic } = req.body || {};
+// Body: { targetPort?, public?, tcpProxy?: { enabled: boolean } }
+router.patch('/services/:serviceId/networking', async (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+    const { targetPort, public: isPublic, tcpProxy } = req.body || {};
 
-  const updates = [];
-  const params = [];
+    if (targetPort !== undefined) {
+      const port = Number(targetPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw validationError('targetPort must be between 1 and 65535', { targetPort: 'Invalid port' });
+      execute('UPDATE service_networking SET target_port = ? WHERE service_id = ?', port, service.id);
+    }
+    if (isPublic !== undefined) execute('UPDATE service_networking SET public = ? WHERE service_id = ?', isPublic ? 1 : 0, service.id);
 
-  if (targetPort !== undefined) {
-    updates.push('target_port = ?');
-    params.push(targetPort);
+    let needsRestart = targetPort !== undefined && targetPort !== null && containerSupervisor.isServiceRunning(service.id) && false;
+    if (tcpProxy && typeof tcpProxy.enabled === 'boolean') {
+      const before = queryOne('SELECT tcp_proxy_port FROM service_networking WHERE service_id = ?', service.id)?.tcp_proxy_port || null;
+      if (tcpProxy.enabled) {
+        // A database open to the internet must have a password.
+        const db = describeDatabase(service);
+        const passwordKey = { postgres: 'POSTGRES_PASSWORD', mysql: 'MYSQL_ROOT_PASSWORD', mongodb: 'MONGO_INITDB_ROOT_PASSWORD', redis: 'REDIS_PASSWORD', pocketbase: 'PB_ADMIN_PASSWORD' }[db?.type];
+        if (db && !String(db.vars[passwordKey] || '').trim()) {
+          throw conflict(`Set ${passwordKey} before opening this database to the internet`, 'password_required');
+        }
+        enableTcpProxy(service.id);
+      } else {
+        disableTcpProxy(service.id);
+      }
+      const after = queryOne('SELECT tcp_proxy_port FROM service_networking WHERE service_id = ?', service.id)?.tcp_proxy_port || null;
+      // The port is published when the container is created, so a running service is recreated (a few seconds of downtime).
+      needsRestart = before !== after && containerSupervisor.isServiceRunning(service.id);
+    }
+
+    if (needsRestart) {
+      execute("UPDATE services SET status = 'deploying' WHERE id = ?", service.id);
+      eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at: new Date().toISOString(), actorId: req.user.id, canvasRevision: null, data: { id: service.id, status: 'deploying' } });
+      containerSupervisor.restartService(service.id).catch((err) => {
+        console.error('[Networking] Restart failed:', err.message);
+        execute("UPDATE services SET status = 'crashed' WHERE id = ?", service.id);
+        eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at: new Date().toISOString(), actorId: null, canvasRevision: null, data: { id: service.id, status: 'crashed' } });
+      });
+    }
+
+    const net = queryOne('SELECT * FROM service_networking WHERE service_id = ?', service.id);
+    const domainRows = queryAll('SELECT * FROM domains WHERE service_id = ?', service.id);
+    return res.json(networkingResponse(service, net, domainRows, needsRestart ? { restarting: true } : {}));
+  } catch (err) {
+    next(err);
   }
-  if (isPublic !== undefined) {
-    updates.push('public = ?');
-    params.push(isPublic ? 1 : 0);
-  }
-
-  if (updates.length > 0) {
-    params.push(service.id);
-    execute(`UPDATE service_networking SET ${updates.join(', ')} WHERE service_id = ?`, ...params);
-  }
-
-  const net = queryOne('SELECT * FROM service_networking WHERE service_id = ?', service.id);
-  const domainRows = queryAll('SELECT * FROM domains WHERE service_id = ?', service.id);
-
-  return res.json({
-    public: net ? Boolean(net.public) : true,
-    targetPort: net?.target_port || 3000,
-    domains: domainRows.map(mapDomain),
-    privateHostname: `${service.name}.morline.internal`,
-    privatePort: net?.private_port || 3000
-  });
 });
 
 // POST /services/:serviceId/domains
@@ -818,7 +847,7 @@ router.get('/services/:serviceId/variables/references', (req, res) => {
   const service = getService(req.params.serviceId);
 
   // Available service variables in this environment that can be referenced
-  const otherServices = queryAll('SELECT id, name FROM services WHERE environment_id = ? AND id != ?', service.environment_id, service.id);
+  const otherServices = queryAll('SELECT * FROM services WHERE environment_id = ? AND id != ?', service.environment_id, service.id);
   const references = [];
 
   for (const s of otherServices) {
@@ -826,7 +855,7 @@ router.get('/services/:serviceId/variables/references', (req, res) => {
       serviceId: s.id,
       serviceName: s.name,
       variableName: `${s.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`,
-      previewValue: `http://${s.name}.morline.internal:3000`
+      previewValue: `http://${privateHostname(s)}:${queryOne('SELECT target_port FROM service_networking WHERE service_id = ?', s.id)?.target_port || 3000}`
     });
   }
 

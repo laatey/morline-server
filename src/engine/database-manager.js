@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { execute, queryOne, queryAll } from '../db/index.js';
 import { DATA_DIR } from '../config.js';
 import { containerSupervisor, containerName } from './container-supervisor.js';
+import { privateHostname } from './private-network.js';
+import { tcpProxyInfo } from './public-tcp.js';
 import zlib from 'node:zlib';
 import { AppError, conflict, notFound } from '../middleware/error-handler.js';
 
@@ -38,7 +40,9 @@ export function describeDatabase(service) {
   const networking = queryOne('SELECT target_port FROM service_networking WHERE service_id = ?', service.id) || {};
   const port = Number(networking.target_port) && Number(networking.target_port) !== 3000
     ? Number(networking.target_port) : DEFAULT_PORT[type];
-  return { type, vars, port, container: containerName(service.id), host: containerName(service.id) };
+  // `container` is the name Docker knows it by (for docker exec and for Morline's own HTTP calls);
+  // `host` is the name other services in the environment should use.
+  return { type, vars, port, container: containerName(service.id), host: privateHostname(service) };
 }
 
 function requireDatabase(service) {
@@ -175,7 +179,7 @@ function parseJsonLines(text) {
 
 // PocketBase is reached over HTTP with its admin account.
 async function pocketbaseToken(db) {
-  const base = `http://${db.host}:${db.port}`;
+  const base = `http://${db.container}:${db.port}`;
   const body = JSON.stringify({ identity: db.vars.PB_ADMIN_EMAIL, password: db.vars.PB_ADMIN_PASSWORD });
   for (const route of ['/api/collections/_superusers/auth-with-password', '/api/admins/auth-with-password']) {
     const res = await fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(8000) }).catch(() => null);
@@ -185,7 +189,7 @@ async function pocketbaseToken(db) {
 }
 
 async function pocketbaseGet(db, token, route) {
-  const res = await fetch(`http://${db.host}:${db.port}${route}`, { headers: { Authorization: token }, signal: AbortSignal.timeout(10_000) });
+  const res = await fetch(`http://${db.container}:${db.port}${route}`, { headers: { Authorization: token }, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new AppError(`PocketBase returned ${res.status}`, 502, 'database_error');
   return res.json();
 }
@@ -275,32 +279,40 @@ async function redisRows(db, key, type, take, skip) {
 
 export function connectionInfo(service) {
   const db = describeDatabase(service);
-  if (!db) return { host: null, port: null, user: null, password: null, database: null, url: null, publicUrl: null };
+  if (!db) return { host: null, port: null, user: null, password: null, database: null, url: null, publicUrl: null, publicHost: null, publicPort: null };
   const { vars, host, port } = db;
   const enc = encodeURIComponent;
-  let user = null; let password = null; let database = null; let url = null;
+  let user; let password; let database = null; let build;
 
   if (db.type === 'postgres') {
     user = vars.POSTGRES_USER || 'postgres'; password = vars.POSTGRES_PASSWORD || ''; database = vars.POSTGRES_DB || user;
-    url = `postgresql://${enc(user)}:${enc(password)}@${host}:${port}/${enc(database)}`;
+    build = (h, p) => `postgresql://${enc(user)}:${enc(password)}@${h}:${p}/${enc(database)}`;
   } else if (db.type === 'mysql') {
     user = vars.MYSQL_USER || 'root';
     password = (vars.MYSQL_USER ? vars.MYSQL_PASSWORD : vars.MYSQL_ROOT_PASSWORD) || '';
     database = vars.MYSQL_DATABASE || null;
-    url = `mysql://${enc(user)}:${enc(password)}@${host}:${port}${database ? `/${enc(database)}` : ''}`;
+    build = (h, p) => `mysql://${enc(user)}:${enc(password)}@${h}:${p}${database ? `/${enc(database)}` : ''}`;
   } else if (db.type === 'mongodb') {
     user = vars.MONGO_INITDB_ROOT_USERNAME || 'admin'; password = vars.MONGO_INITDB_ROOT_PASSWORD || '';
     database = vars.MONGO_INITDB_DATABASE || null;
-    url = `mongodb://${enc(user)}:${enc(password)}@${host}:${port}/${database ? enc(database) : ''}?authSource=admin`;
+    build = (h, p) => `mongodb://${enc(user)}:${enc(password)}@${h}:${p}/${database ? enc(database) : ''}?authSource=admin`;
   } else if (db.type === 'redis') {
     user = 'default'; password = vars.REDIS_PASSWORD || '';
-    url = `redis://${password ? `:${enc(password)}@` : ''}${host}:${port}`;
+    build = (h, p) => `redis://${password ? `:${enc(password)}@` : ''}${h}:${p}`;
   } else {
     user = vars.PB_ADMIN_EMAIL || null; password = vars.PB_ADMIN_PASSWORD || null;
-    url = `http://${host}:${port}`;
+    build = (h, p) => `http://${h}:${p}`;
   }
-  // Morline has no public TCP proxy yet, so databases are only reachable over the private network.
-  return { host, port, user, password, database, url, publicUrl: null };
+
+  // `host`/`url` work from other services in the same environment. `publicUrl` works from anywhere,
+  // and only exists once the public TCP port has been turned on for this service.
+  const tcp = tcpProxyInfo(queryOne('SELECT tcp_proxy_port FROM service_networking WHERE service_id = ?', service.id));
+  return {
+    host, port, user, password, database, url: build(host, port),
+    publicUrl: tcp.enabled ? build(tcp.host, tcp.port) : null,
+    publicHost: tcp.enabled ? tcp.host : null,
+    publicPort: tcp.enabled ? tcp.port : null
+  };
 }
 
 // ------------------------------------------------------------------ backups

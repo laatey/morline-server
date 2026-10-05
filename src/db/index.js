@@ -68,6 +68,11 @@ function applyMigrations(db) {
     }
   }
 
+  // Public TCP port for a service (databases and other non-HTTP services)
+  const netCols = db.prepare('PRAGMA table_info(service_networking);').all().map(c => c.name);
+  if (!netCols.includes('tcp_proxy_port')) db.exec('ALTER TABLE service_networking ADD COLUMN tcp_proxy_port INTEGER;');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_networking_tcp_port ON service_networking(tcp_proxy_port) WHERE tcp_proxy_port IS NOT NULL;');
+
   // Service app type, stop support, and the "created" status for never-deployed services
   const serviceCols = db.prepare('PRAGMA table_info(services);').all().map(c => c.name);
   if (!serviceCols.includes('framework')) db.exec('ALTER TABLE services ADD COLUMN framework TEXT;');

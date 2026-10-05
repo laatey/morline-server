@@ -37,6 +37,7 @@ import templatesRouter from './routes/templates.js';
 initDb();
 startMetering();
 containerSupervisor.startWatchdog();
+setTimeout(() => containerSupervisor.restoreServices().catch((err) => console.warn('[Restore] Failed:', err.message)), 3000).unref();
 startDomainChecks((row) => emitDomainUpdate(row, mapDomain));
 try { recoverBackups(); } catch (err) { console.warn('[Backup] Recovery skipped:', err.message); }
 try { backfillAppTypes(); } catch (err) { console.warn('[AppType] Backfill skipped:', err.message); }
@@ -259,9 +260,13 @@ function handleShutdown(signal) {
   try { flushMetering(); } catch { /* best effort */ }
   tunnelManager.stop();
   server.close(async () => {
-    // Terminate any active child processes
-    for (const [serviceId] of containerSupervisor.processes) {
-      await containerSupervisor.stopService(serviceId, true);
+    // Customer containers outlive Morline: they keep running (and are adopted again at the next start), so a
+    // Morline deploy no longer takes every customer service offline. Set STOP_SERVICES_ON_EXIT=1 to stop them
+    // instead, for example on a development machine.
+    if (process.env.STOP_SERVICES_ON_EXIT === '1') {
+      for (const [serviceId] of containerSupervisor.processes) {
+        await containerSupervisor.stopService(serviceId, true);
+      }
     }
     console.log('Server and processes terminated cleanly.');
     process.exit(0);

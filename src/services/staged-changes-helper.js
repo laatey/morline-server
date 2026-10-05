@@ -1,3 +1,4 @@
+import { privateHostname } from '../engine/private-network.js';
 import crypto from 'node:crypto';
 import { execute, queryOne, queryAll } from '../db/index.js';
 
@@ -42,7 +43,7 @@ function isServiceReferencedInVariable(v, other) {
   if (val.includes(`\${${srvName}`) || (srvId && val.includes(`\${${srvId}`))) return true;
 
   // 2. Internal domain: postgres.morline.internal
-  if (val.includes(`${srvName}.morline.internal`)) return true;
+  if (val.includes(`${srvName}.morline.internal`) || val.includes(privateHostname(other))) return true;
 
   // 3. Host / protocol reference: http://postgres, postgres:5432, @postgres:
   if (val.includes(`://${srvName}`) || val.includes(`@${srvName}:`)) return true;

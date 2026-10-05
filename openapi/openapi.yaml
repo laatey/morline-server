@@ -1366,7 +1366,12 @@ paths:
         "200": { description: Networking, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
     patch:
       tags: [Domains]
-      summary: Change target port / toggle public exposure
+      summary: Change target port, toggle public HTTP, or open/close a public TCP port
+      description: |
+        `tcpProxy.enabled: true` gives the service its own port on the public address (for databases and other non-HTTP
+        services). Docker publishes it when the container is created, so a running service is recreated, which takes a
+        few seconds; the response then has `restarting: true`. Known databases must have a password set first
+        (`409 password_required`).
       requestBody:
         required: true
         content:
@@ -1376,6 +1381,7 @@ paths:
               properties:
                 targetPort: { type: integer, minimum: 1, maximum: 65535 }
                 public: { type: boolean }
+                tcpProxy: { type: object, properties: { enabled: { type: boolean } } }
       responses:
         "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
   /services/{serviceId}/domains:
@@ -1540,7 +1546,7 @@ paths:
     parameters: [{ $ref: "#/components/parameters/serviceId" }]
     get:
       tags: [Databases]
-      summary: Connection details (private network; `publicUrl` is always null today)
+      summary: Connection details. `url` works from services in the same environment; `publicUrl` works from anywhere once public TCP is on
       responses:
         "200":
           description: Connection
@@ -1555,7 +1561,9 @@ paths:
                   password: { type: [string, "null"] }
                   database: { type: [string, "null"] }
                   url: { type: [string, "null"] }
-                  publicUrl: { type: [string, "null"] }
+                  publicUrl: { type: [string, "null"], description: Null until public TCP is enabled for the service }
+                  publicHost: { type: [string, "null"] }
+                  publicPort: { type: [integer, "null"] }
   /services/{serviceId}/backups:
     parameters: [{ $ref: "#/components/parameters/serviceId" }]
     get:
@@ -2687,7 +2695,15 @@ components:
         public: { type: boolean }
         targetPort: { type: [integer, "null"] }
         domains: { type: array, items: { $ref: "#/components/schemas/Domain" } }
-        privateHostname: { type: string, example: api.morline.internal }
+        privateHostname: { type: string, example: api.morline.internal, description: "Resolves only for other services in the same environment. A second service with the same name gets a short suffix." }
+        tcpProxy:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            host: { type: string, example: edge.morline.space }
+            port: { type: [integer, "null"], example: 30000 }
+            address: { type: [string, "null"], example: "edge.morline.space:30000" }
+        restarting: { type: boolean, description: Present when the change recreated the container }
         privatePort: { type: [integer, "null"] }
 
     # GitHub

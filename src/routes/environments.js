@@ -1,5 +1,6 @@
 import { resolveGithubSource } from '../services/github-url.js';
 import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
+import { privateHostname } from '../engine/private-network.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
@@ -392,7 +393,7 @@ router.post('/:environmentId/connections', (req, res, next) => {
 
       if (injectVariables) {
         const key = `${toSrv.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_URL`;
-        const val = `http://${toSrv.name}.morline.internal:${effectivePort}`;
+        const val = `http://${privateHostname(toSrv)}:${effectivePort}`;
         const varId = `var_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
         execute(`

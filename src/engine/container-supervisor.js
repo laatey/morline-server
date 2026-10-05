@@ -10,6 +10,7 @@ import { APPS_DIR, DATA_DIR } from '../config.js';
 import { execute, queryAll, queryOne } from '../db/index.js';
 import { logManager } from './log-manager.js';
 import { eventBus } from './event-bus.js';
+import { attachToPrivateNetwork, attachByLabel } from './private-network.js';
 import { notify, recipientsForDeployment, projectOfEnvironment, adminsOfProject, projectLink } from '../services/notifications.js';
 
 const NETWORK = 'morline-runtime';
@@ -226,6 +227,8 @@ export class ContainerSupervisor {
     }
     if (settings.memory_limit_mb) args.push('--memory', `${settings.memory_limit_mb}m`);
     if (settings.cpu_limit) args.push('--cpus', String(settings.cpu_limit));
+    // Public TCP access: Docker publishes the service's port on the host under its own public port.
+    if (networking.tcp_proxy_port) args.push('--publish', `${networking.tcp_proxy_port}:${targetPort}`);
     args.push(image);
 
     await run('docker', args);
@@ -233,8 +236,27 @@ export class ContainerSupervisor {
     const info = { serviceId, deploymentId, image, name, port: targetPort, environmentId: service.environment_id };
     this.processes.set(serviceId, info);
     this.followLogs(service, info);
+    await this.attachPrivate(service, info, () => attachToPrivateNetwork(service, name));
     this.pollHealthCheck(serviceId, deploymentId, this.endpoint(serviceId, targetPort), settings.healthcheck_path || '/', settings.healthcheck_timeout_sec || 30);
     return info;
+  }
+
+  // Joining the private network is what makes <name>.morline.internal resolve. A failure is reported
+  // in the service's logs but does not stop the service from running.
+  async attachPrivate(service, info, attach) {
+    try {
+      const { alias } = await attach();
+      this.log(service, info, 'info', `[Network] Reachable inside the environment as ${alias}`);
+    } catch (err) {
+      this.log(service, info, 'warn', `[Network] Private networking is unavailable: ${err.message}`);
+    }
+  }
+
+  async refreshPrivateAlias(serviceId) {
+    const service = queryOne('SELECT * FROM services WHERE id = ?', serviceId);
+    const info = this.processes.get(serviceId);
+    if (!service || !info) return;
+    await this.attachPrivate(service, info, () => (info.kind === 'compose' ? attachByLabel(service, info.composeService) : attachToPrivateNetwork(service, info.name)));
   }
 
   async startComposeService(serviceId, deploymentId, { cwd, composePath, onLog } = {}) {
@@ -265,6 +287,7 @@ export class ContainerSupervisor {
       services: Object.fromEntries(entries.map(([name]) => [name, {
         env_file: [hostWorkspacePath(envFile)],
         networks: { [NETWORK]: { aliases: name === selected ? [alias] : [] } },
+        ...(name === selected && networking.tcp_proxy_port ? { ports: [`${networking.tcp_proxy_port}:${targetPort}`] } : {}),
         labels: { 'morline.service_id': serviceId, 'morline.deployment_id': deploymentId }
       }])),
       networks: { [NETWORK]: { external: true, name: NETWORK } }
@@ -275,8 +298,9 @@ export class ContainerSupervisor {
     const log = (level, line) => onLog?.(level, line);
     await run('docker', ['compose', '--project-name', project, '-f', hostCompose, '-f', hostOverride, 'up', '--build', '-d'], { cwd, onLine: log });
     execute('UPDATE services SET port = ? WHERE id = ?', targetPort, serviceId);
-    const info = { serviceId, deploymentId, name: alias, port: targetPort, environmentId: service.environment_id, kind: 'compose', project, hostCompose, hostOverride };
+    const info = { serviceId, deploymentId, name: alias, port: targetPort, environmentId: service.environment_id, kind: 'compose', project, hostCompose, hostOverride, composeService: selected };
     this.processes.set(serviceId, info);
+    await this.attachPrivate(service, info, () => attachByLabel(service, selected));
     this.pollHealthCheck(serviceId, deploymentId, this.endpoint(serviceId, targetPort), settings.healthcheck_path || '/', settings.healthcheck_timeout_sec || 30);
     return info;
   }
@@ -505,13 +529,77 @@ export class ContainerSupervisor {
   async stopService(serviceId, releasePort = true) {
     const info = this.processes.get(serviceId);
     info?.logChild?.kill('SIGTERM');
-    if (info?.kind === 'compose') {
+    if (info?.kind === 'compose' && info.hostCompose) {
       try { await run('docker', ['compose', '--project-name', info.project, '-f', info.hostCompose, '-f', info.hostOverride, 'down']); } catch {}
+    } else if (info?.kind === 'compose') {
+      // Adopted after a Morline restart: the compose files are not remembered, so remove by label.
+      try {
+        let ids = '';
+        await run('docker', ['ps', '-aq', '--filter', `label=morline.service_id=${serviceId}`], { onLine: (_, line) => { ids += `${line} `; } });
+        if (ids.trim()) await run('docker', ['rm', '--force', ...ids.trim().split(/\s+/)]);
+      } catch {}
     } else {
       try { await run('docker', ['rm', '--force', containerName(serviceId)]); } catch {}
     }
     this.processes.delete(serviceId);
     if (releasePort) execute('UPDATE services SET port = NULL WHERE id = ?', serviceId);
+  }
+
+  /**
+   * After Morline restarts it knows nothing about the containers it started. Walk the services that should be
+   * running: adopt a container that is still up (reconnecting logs and private DNS), and start one that is gone
+   * from its already-built image. Without this, every Morline deploy left all customer services offline.
+   */
+  async restoreServices() {
+    const found = new Map();
+    let listing = '';
+    try {
+      await run('docker', ['ps', '-a', '--filter', 'label=morline.service_id', '--format',
+        '{{.Names}}|{{.State}}|{{.Label "morline.service_id"}}|{{.Label "morline.deployment_id"}}|{{.Label "com.docker.compose.service"}}'],
+      { onLine: (_, line) => { listing += `${line}\n`; } });
+    } catch (err) {
+      console.warn('[Restore] Docker is not reachable, skipping:', err.message);
+      return { adopted: 0, started: 0, failed: 0 };
+    }
+    for (const line of listing.split('\n').filter(Boolean)) {
+      const [name, state, serviceId, deploymentId, composeService] = line.split('|');
+      const previous = found.get(serviceId);
+      if (!previous || (state === 'running' && previous.state !== 'running')) found.set(serviceId, { name, state, deploymentId, composeService });
+    }
+
+    const result = { adopted: 0, started: 0, failed: 0 };
+    const wanted = queryAll("SELECT * FROM services WHERE status IN ('online', 'crashed') AND active_deployment_id IS NOT NULL");
+    for (const service of wanted) {
+      if (this.processes.has(service.id)) continue;
+      const settings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', service.id) || {};
+      const networking = queryOne('SELECT * FROM service_networking WHERE service_id = ?', service.id) || {};
+      const targetPort = Number(networking.target_port || service.port || 3000);
+      const container = found.get(service.id);
+      try {
+        if (container?.state === 'running') {
+          const compose = Boolean(container.composeService);
+          const info = {
+            serviceId: service.id, deploymentId: container.deploymentId || service.active_deployment_id,
+            name: compose ? containerName(service.id) : container.name, port: targetPort,
+            environmentId: service.environment_id, ...(compose ? { kind: 'compose', project: `morline-${safeName(service.id)}`, composeService: container.composeService } : {})
+          };
+          this.processes.set(service.id, info);
+          if (!compose) this.followLogs(service, info);
+          await this.attachPrivate(service, info, () => (compose ? attachByLabel(service, container.composeService) : attachToPrivateNetwork(service, container.name)));
+          result.adopted += 1;
+        } else {
+          await this.startService(service.id, service.active_deployment_id);
+          result.started += 1;
+        }
+      } catch (err) {
+        result.failed += 1;
+        console.warn(`[Restore] ${service.name} (${service.id}): ${err.message}`);
+        execute("UPDATE services SET status = 'crashed' WHERE id = ?", service.id);
+        eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at: new Date().toISOString(), actorId: null, canvasRevision: null, data: { id: service.id, status: 'crashed' } });
+      }
+    }
+    console.log(`[Restore] ${result.adopted} adopted, ${result.started} started, ${result.failed} failed`);
+    return result;
   }
 
   async restartService(serviceId) {

@@ -1,4 +1,5 @@
 import { liveUsage } from '../engine/usage-meter.js';
+import { privateHostname } from '../engine/private-network.js';
 export function mapUser(row) {
   if (!row) return null;
   return {
@@ -217,7 +218,7 @@ export function mapServiceDetail(service, settings, topology) {
       replicas: 1
     },
     topology: topology || {
-      privateEndpoint: `${service.name}.morline.internal:${service.port || 3000}`,
+      privateEndpoint: `${privateHostname(service)}:${service.port || 3000}`,
       publicEndpoints: service.primaryDomain ? [`https://${service.primaryDomain}`] : [],
       dependencies: [],
       consumers: []
