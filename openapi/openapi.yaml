@@ -965,28 +965,37 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, mountPath, sizeGb]
+              required: [mountPath]
               properties:
                 name: { type: string }
                 mountPath: { type: string }
-                sizeGb: { type: integer, minimum: 1 }
+                sizeGb: { type: number, minimum: 0.1, default: 1 }
       responses:
         "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Volume" } } } }
   /volumes/{volumeId}:
     parameters: [{ name: volumeId, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [Services]
+      summary: Get volume details
+      responses:
+        "200": { description: Volume, content: { application/json: { schema: { $ref: "#/components/schemas/Volume" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
     patch:
       tags: [Services]
-      summary: Resize volume (grow only)
+      summary: Resize or update volume
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object, required: [sizeGb], properties: { sizeGb: { type: integer } } } } }
+        content: { application/json: { schema: { type: object, properties: { sizeGb: { type: number, minimum: 0.1 }, name: { type: string }, mountPath: { type: string } } } } }
       responses:
         "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Volume" } } } }
-        "400": { description: Cannot shrink, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [Services]
       summary: Delete volume
-      responses: { "204": { description: Deleted } }
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── CONNECTIONS ─────────────────────────────
   /environments/{environmentId}/connections:

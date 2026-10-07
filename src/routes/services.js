@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
 import { mapService, mapServiceDetail, mapDeployment, mapDomain, mapVariable, mapVolume } from '../db/mappers.js';
@@ -16,9 +17,7 @@ import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
 import { normalizeHost, hostProblem, newToken, dnsRecordsFor } from '../engine/domain-manager.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
-import { APPS_DIR } from '../config.js';
-import { AppError } from '../middleware/error-handler.js';
-import { BASE_DOMAIN } from '../config.js';
+import { APPS_DIR, DATA_DIR, BASE_DOMAIN } from '../config.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
 const router = Router();
@@ -862,20 +861,39 @@ router.get('/services/:serviceId/variables/references', (req, res) => {
   return res.json({ data: references });
 });
 
-// GET /services/:serviceId/volumes
-router.get('/services/:serviceId/volumes', (req, res) => {
-  const service = getService(req.params.serviceId);
-  const rows = queryAll('SELECT * FROM volumes WHERE service_id = ?', service.id);
-  return res.json({ data: rows.map(mapVolume) });
+// GET /services/:serviceId/volumes (or /services/:id/volumes)
+router.get(['/services/:serviceId/volumes', '/services/:id/volumes'], (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId || req.params.id);
+    const rows = queryAll('SELECT * FROM volumes WHERE service_id = ? ORDER BY created_at ASC', service.id);
+    return res.json({ data: rows.map(mapVolume) });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// POST /services/:serviceId/volumes
-router.post('/services/:serviceId/volumes', (req, res, next) => {
+// POST /services/:serviceId/volumes (or /services/:id/volumes)
+router.post(['/services/:serviceId/volumes', '/services/:id/volumes'], (req, res, next) => {
   try {
-    const service = getService(req.params.serviceId);
-    const { name, mountPath, sizeGb = 1.0 } = req.body || {};
+    const service = getService(req.params.serviceId || req.params.id);
+    const { name, mountPath, sizeGb } = req.body || {};
 
-    if (!name || !mountPath) throw validationError('name and mountPath are required');
+    if (!mountPath || typeof mountPath !== 'string') {
+      throw validationError('mountPath is required');
+    }
+    const cleanPath = mountPath.trim();
+    if (!cleanPath.startsWith('/')) {
+      throw validationError('mountPath must start with /');
+    }
+
+    const existing = queryOne('SELECT id FROM volumes WHERE service_id = ? AND mount_path = ?', service.id, cleanPath);
+    if (existing) {
+      throw conflict(`A volume is already mounted at ${cleanPath}`);
+    }
+
+    const numSize = Number(sizeGb);
+    const parsedSize = Number.isFinite(numSize) && numSize > 0 ? Math.max(0.1, Math.min(500, numSize)) : 1.0;
+    const volName = (name && String(name).trim()) || cleanPath.replace(/^\/+/, '').replace(/[^a-zA-Z0-9_-]/g, '-') || 'data';
 
     const volId = `vol_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
@@ -883,10 +901,23 @@ router.post('/services/:serviceId/volumes', (req, res, next) => {
     execute(`
       INSERT INTO volumes (id, service_id, name, mount_path, size_gb, used_gb, created_at)
       VALUES (?, ?, ?, ?, ?, 0.0, ?)
-    `, volId, service.id, name, mountPath, sizeGb, now);
+    `, volId, service.id, volName, cleanPath, parsedSize, now);
+
+    const hostDir = path.join(DATA_DIR, 'service-volumes', service.id, volId);
+    try { fs.mkdirSync(hostDir, { recursive: true }); } catch {}
+
+    createStagedChange({
+      environmentId: service.environment_id,
+      serviceId: service.id,
+      serviceName: service.name,
+      type: 'volume',
+      summary: `Attached volume ${cleanPath} (${parsedSize} GB)`,
+      payload: { action: 'attach', volumeId: volId, mountPath: cleanPath, sizeGb: parsedSize }
+    });
 
     const row = queryOne('SELECT * FROM volumes WHERE id = ?', volId);
-    return res.status(201).json(mapVolume(row));
+    const mapped = mapVolume(row);
+    return res.status(201).json({ ...mapped, data: mapped });
   } catch (err) {
     next(err);
   }
@@ -902,6 +933,19 @@ router.get('/services/:serviceId/metrics', (req, res) => {
   return res.json(result);
 });
 
+// GET /volumes/:volumeId
+router.get('/volumes/:volumeId', (req, res, next) => {
+  try {
+    const volId = req.params.volumeId;
+    const vol = queryOne('SELECT * FROM volumes WHERE id = ?', volId);
+    if (!vol) throw notFound('Volume not found');
+    const mapped = mapVolume(vol);
+    return res.json({ ...mapped, data: mapped });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH /volumes/:volumeId
 router.patch('/volumes/:volumeId', (req, res, next) => {
   try {
@@ -909,23 +953,82 @@ router.patch('/volumes/:volumeId', (req, res, next) => {
     const vol = queryOne('SELECT * FROM volumes WHERE id = ?', volId);
     if (!vol) throw notFound('Volume not found');
 
-    const { sizeGb } = req.body || {};
+    const { sizeGb, name, mountPath } = req.body || {};
+    let nextSize = Number(vol.size_gb || 1);
+
     if (sizeGb !== undefined) {
-      execute('UPDATE volumes SET size_gb = ? WHERE id = ?', sizeGb, volId);
+      const numSize = Number(sizeGb);
+      if (!Number.isFinite(numSize) || numSize <= 0) {
+        throw validationError('sizeGb must be a positive number');
+      }
+      nextSize = Math.max(0.1, Math.min(500, numSize));
+      execute('UPDATE volumes SET size_gb = ? WHERE id = ?', nextSize, volId);
+    }
+
+    if (name !== undefined) {
+      const cleanName = String(name).trim();
+      if (cleanName) {
+        execute('UPDATE volumes SET name = ? WHERE id = ?', cleanName, volId);
+      }
+    }
+
+    if (mountPath !== undefined) {
+      const cleanPath = String(mountPath).trim();
+      if (!cleanPath.startsWith('/')) {
+        throw validationError('mountPath must start with /');
+      }
+      const existing = queryOne('SELECT id FROM volumes WHERE service_id = ? AND mount_path = ? AND id != ?', vol.service_id, cleanPath, volId);
+      if (existing) {
+        throw conflict(`A volume is already mounted at ${cleanPath}`);
+      }
+      execute('UPDATE volumes SET mount_path = ? WHERE id = ?', cleanPath, volId);
+    }
+
+    const service = queryOne('SELECT * FROM services WHERE id = ?', vol.service_id);
+    if (service) {
+      createStagedChange({
+        environmentId: service.environment_id,
+        serviceId: service.id,
+        serviceName: service.name,
+        type: 'volume',
+        summary: `Resized volume ${vol.mount_path} to ${nextSize} GB`,
+        payload: { action: 'resize', volumeId: volId, sizeGb: nextSize }
+      });
     }
 
     const updated = queryOne('SELECT * FROM volumes WHERE id = ?', volId);
-    return res.json(mapVolume(updated));
+    const mapped = mapVolume(updated);
+    return res.json({ ...mapped, data: mapped });
   } catch (err) {
     next(err);
   }
 });
 
 // DELETE /volumes/:volumeId
-router.delete('/volumes/:volumeId', (req, res) => {
-  const volId = req.params.volumeId;
-  execute('DELETE FROM volumes WHERE id = ?', volId);
-  return res.status(204).end();
+router.delete('/volumes/:volumeId', (req, res, next) => {
+  try {
+    const volId = req.params.volumeId;
+    const vol = queryOne('SELECT * FROM volumes WHERE id = ?', volId);
+    if (!vol) throw notFound('Volume not found');
+
+    execute('DELETE FROM volumes WHERE id = ?', volId);
+
+    const service = queryOne('SELECT * FROM services WHERE id = ?', vol.service_id);
+    if (service) {
+      createStagedChange({
+        environmentId: service.environment_id,
+        serviceId: service.id,
+        serviceName: service.name,
+        type: 'volume',
+        summary: `Removed volume ${vol.mount_path}`,
+        payload: { action: 'delete', volumeId: volId }
+      });
+    }
+
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ---------------------------------------------------------------------------

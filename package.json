@@ -8,7 +8,9 @@
   "scripts": {
     "start": "node --no-warnings src/index.js",
     "dev": "node --no-warnings --watch src/index.js",
-    "test:runtime": "node --test test/runtime-resolver.test.js"
+    "test": "node --test test/runtime-resolver.test.js test/volumes.test.js",
+    "test:runtime": "node --test test/runtime-resolver.test.js",
+    "test:volumes": "node --test test/volumes.test.js"
   },
   "engines": {
     "node": ">=22"

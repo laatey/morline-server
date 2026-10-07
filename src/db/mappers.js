@@ -241,13 +241,15 @@ export function mapConnection(row) {
 
 export function mapVolume(row) {
   if (!row) return null;
+  const numUsed = Number(row.used_gb);
+  const usedGb = numUsed > 0 ? numUsed : null;
   return {
     id: row.id,
     serviceId: row.service_id,
     name: row.name,
     mountPath: row.mount_path,
     sizeGb: Number(row.size_gb || 1),
-    usedGb: Number(row.used_gb || 0),
+    ...(usedGb !== null ? { usedGb } : {}),
     createdAt: row.created_at
   };
 }
