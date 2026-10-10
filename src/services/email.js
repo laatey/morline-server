@@ -32,7 +32,7 @@ const baseStyle = `
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0a0a0a; color: #f5f5f5; font-family: system-ui, -apple-system, sans-serif; padding: 40px 20px; }
-    .card { max-width: 480px; margin: 0 auto; background: #141414; border: 1px solid #262626; border-radius: 12px; padding: 32px; }
+    .card { max-width: 480px; margin: 0 auto; width: 100%; }
     .logo { font-size: 17px; font-weight: 700; letter-spacing: -0.5px; color: #f5f5f5; margin-bottom: 28px; }
     h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; margin-bottom: 10px; }
     p { font-size: 14px; color: #a3a3a3; line-height: 1.6; margin-bottom: 16px; }
