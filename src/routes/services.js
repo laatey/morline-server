@@ -15,7 +15,7 @@ import { privateHostname } from '../engine/private-network.js';
 import { tcpProxyInfo, enableTcpProxy, disableTcpProxy } from '../engine/public-tcp.js';
 import { udpProxyInfo, parseUdpPorts, setUdpPorts } from '../engine/public-udp.js';
 import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
-import { normalizeHost, hostProblem, newToken, dnsRecordsFor } from '../engine/domain-manager.js';
+import { normalizeHost, hostProblem, newToken, dnsRecordsFor, detectCloudflare } from '../engine/domain-manager.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
 import { APPS_DIR, DATA_DIR, BASE_DOMAIN } from '../config.js';
@@ -569,6 +569,9 @@ router.post('/services/:serviceId/domains', async (req, res, next) => {
 
     const row = queryOne('SELECT * FROM domains WHERE id = ?', domainId);
     const mapped = mapDomain(row);
+    if (domainKind === 'custom') {
+      mapped.dnsProvider = await detectCloudflare(cleanHost);
+    }
 
     eventBus.emitEnvironmentEvent(service.environment_id, {
       type: 'domain.updated',

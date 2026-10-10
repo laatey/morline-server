@@ -50,6 +50,38 @@ export function hostProblem(host) {
 
 export const newToken = () => crypto.randomBytes(16).toString('hex');
 
+export async function detectCloudflare(host) {
+  try {
+    const labels = String(host || '').toLowerCase().trim().split('.');
+    if (labels.length < 2) return null;
+    const multiPartTlds = ['co.uk', 'com.br', 'co.nz', 'com.au', 'org.uk', 'gov.uk'];
+    const lastTwo = labels.slice(-2).join('.');
+    const apex = labels.length > 2 && multiPartTlds.includes(lastTwo)
+      ? labels.slice(-3).join('.')
+      : labels.slice(-2).join('.');
+    const subdomain = host === apex ? '@' : host.slice(0, -(apex.length + 1));
+
+    const [nsList, domainConnectTxt] = await Promise.all([
+      dns.resolveNs(apex).catch(() => []),
+      dns.resolveTxt(`_domainconnect.${apex}`).catch(() => [])
+    ]);
+
+    const isNsCloudflare = nsList.some((ns) => ns.toLowerCase().includes('cloudflare.com'));
+    const isDcCloudflare = domainConnectTxt.some((chunks) => chunks.join('').toLowerCase().includes('cloudflare'));
+
+    if (isNsCloudflare || isDcCloudflare) {
+      return {
+        id: 'cloudflare',
+        name: 'Cloudflare',
+        apex,
+        subdomain,
+        autoConfigUrl: `https://dash.cloudflare.com/domainconnect/v2/domainTemplates/providers/morline/services/app/apply?domain=${encodeURIComponent(apex)}&subdomain=${encodeURIComponent(subdomain)}`
+      };
+    }
+  } catch (_) {}
+  return null;
+}
+
 // ---------------------------------------------------------------- DNS instructions and checks
 
 async function edgeAddresses() {

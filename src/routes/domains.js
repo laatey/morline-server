@@ -5,7 +5,7 @@ import { mapDomain } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
 import { notFound, validationError } from '../middleware/error-handler.js';
 import { eventBus } from '../engine/event-bus.js';
-import { checkDomain, emitDomainUpdate } from '../engine/domain-manager.js';
+import { checkDomain, emitDomainUpdate, detectCloudflare } from '../engine/domain-manager.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -103,6 +103,17 @@ router.post('/:domainId/verify', async (req, res, next) => {
     const mapped = mapDomain(row);
     emitDomainUpdate(row, mapDomain, req.user.id);
     return res.json(mapped);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /domains/:domainId/dns-provider
+router.get('/:domainId/dns-provider', async (req, res, next) => {
+  try {
+    const domain = getDomain(req.params.domainId);
+    const provider = await detectCloudflare(domain.host);
+    return res.json({ provider });
   } catch (err) {
     next(err);
   }
