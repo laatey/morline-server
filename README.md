@@ -132,7 +132,7 @@ node test-sse.js
 | **GitHub** | `/v1/integrations/github` | Team GitHub connection status, repo listing, branch detection, framework auto-detection |
 | **Templates** | `/v1/templates`, `/v1/regions` | Catalogues for starters (Next.js, Vite, Python FastAPI, Go, Rust, Express) and databases (Postgres, Redis, MySQL, MongoDB, SQLite) |
 
-## Networking: private names and public TCP
+## Networking: Private Networks, Public TCP & Public UDP
 
 **Private names.** Every service is reachable from the other services of its environment as
 `<service-name>.morline.internal`. Each environment gets its own Docker network (`morline-env-<id>`, a /26 taken from
@@ -140,22 +140,36 @@ node test-sse.js
 environment share a name, the older keeps `name.morline.internal` and the newer gets `name-<4 chars of its id>`.
 Containers also stay on the shared `morline-runtime` network so the reverse proxy can reach them.
 
-**Public TCP (databases etc.).** A service can be given a public port from `TCP_PROXY_PORTS` (default `30000-30999`),
-published by Docker straight from its container. For this to work on AWS:
+**Public TCP (databases, Redis, etc.).** A service can be given a public port from `TCP_PROXY_PORTS` (default `30000-30999`),
+published by Docker straight from its container.
+- Accessible directly via `edge.<BASE_DOMAIN>:<port>` (e.g. `edge.morline.space:30001`).
+- AWS EC2 Security Group allows inbound TCP `30000-30999`.
+- Connection is plain TCP (no TLS), relying on service-level authentication.
 
-- allow inbound TCP `30000-30999` in the instance's security group;
-- `PUBLIC_TCP_HOST` (default `edge.<BASE_DOMAIN>`) must resolve to the instance's public IP;
-- the connection is plain TCP (no TLS), so rely on the generated password.
+**Public UDP (RADIUS, WireGuard, DNS, game servers...).** A service can declare the UDP ports it listens on inside its container (`PATCH /v1/services/:id/networking` with `udpPorts: [1812, 1813]`, or via the Network tab in the dashboard).
+- **Port Allocation**: Each exposed port receives a dedicated public port from `UDP_PROXY_PORTS` (default `31000-31999`), tracked in the SQLite table `service_udp_ports`.
+- **Docker Publishing**: Published directly by Docker via `--publish <publicPort>:<containerPort>/udp`.
+- **Environment Injection**: The container automatically receives `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<containerPort>` so applications can discover and report their own public endpoints.
+- **Service Recreation**: Changing UDP mappings safely recreates running containers to bind host sockets.
 
-**Public UDP (RADIUS, WireGuard, DNS...).** A service can list the UDP ports it listens on (`PATCH /services/:id/networking`
-with `udpPorts: [1812, 1813]`, or the Network tab in the dashboard). Each gets a port from `UDP_PROXY_PORTS` (default
-`31000-31999`), published by Docker (`--publish 31000:1812/udp`). On AWS:
+---
 
-- allow inbound **UDP** `31000-31999` in the instance's security group (a separate rule from the TCP one);
-- `PUBLIC_UDP_HOST` (default: `PUBLIC_TCP_HOST`, then `edge.<BASE_DOMAIN>`) must resolve to the instance's public IP, so use an Elastic IP;
-- UDP cannot go through an Application Load Balancer, CloudFront or a Cloudflare tunnel or proxy; use the instance's own address;
-- the app gets `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<container port>` so it can tell its clients the public address;
-- changing the list recreates a running container (a few seconds of downtime), and UDP has no encryption or password of its own.
+## ☁️ AWS Production Infrastructure Configuration
 
-**Restarts.** Customer containers are no longer stopped when Morline stops. After Morline starts it adopts the containers
+The production backend runs on AWS EC2 (`eu-north-1`, instance `i-060640ca39b79f9fa`):
+
+1. **Security Group (`morline-api-public` / `sg-0acf0ec08f7679cca`)**:
+   - `TCP 80`: HTTP traffic (Caddy edge proxy)
+   - `TCP 443`: HTTPS traffic with automated on-demand TLS
+   - `TCP 30000-30999`: Public TCP proxy for databases and TCP services
+   - `UDP 31000-31999`: Public UDP proxy for UDP services (Rule ID: `sgr-031c70104b22f7981`)
+2. **Direct Edge Routing**:
+   - `edge.morline.space` resolves directly to the EC2 Elastic IP (`13.63.17.173`).
+   - UDP bypasses Application Load Balancers and Cloudflare CDN proxies to ensure unfiltered datagram delivery.
+3. **Automated Deploy Pipeline (`deploy-wizard/`)**:
+   - Deploys source packages directly via AWS S3 bucket `morline-deploy-602480250061-eu-north-1` and AWS Systems Manager (SSM) agent.
+   - Builds production containers using `docker-compose.production.yml` and `edge/docker-compose.edge.yml`.
+   - Health checks verify API liveness at `https://api.morline.space/health`.
+
+**Restarts & Persistence.** Customer containers are no longer stopped when Morline stops. After Morline starts it adopts the containers
 that are still running and starts any that are missing. Set `STOP_SERVICES_ON_EXIT=1` to get the old behaviour on a dev machine.
