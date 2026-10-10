@@ -147,5 +147,15 @@ published by Docker straight from its container. For this to work on AWS:
 - `PUBLIC_TCP_HOST` (default `edge.<BASE_DOMAIN>`) must resolve to the instance's public IP;
 - the connection is plain TCP (no TLS), so rely on the generated password.
 
+**Public UDP (RADIUS, WireGuard, DNS...).** A service can list the UDP ports it listens on (`PATCH /services/:id/networking`
+with `udpPorts: [1812, 1813]`, or the Network tab in the dashboard). Each gets a port from `UDP_PROXY_PORTS` (default
+`31000-31999`), published by Docker (`--publish 31000:1812/udp`). On AWS:
+
+- allow inbound **UDP** `31000-31999` in the instance's security group (a separate rule from the TCP one);
+- `PUBLIC_UDP_HOST` (default: `PUBLIC_TCP_HOST`, then `edge.<BASE_DOMAIN>`) must resolve to the instance's public IP, so use an Elastic IP;
+- UDP cannot go through an Application Load Balancer, CloudFront or a Cloudflare tunnel or proxy; use the instance's own address;
+- the app gets `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<container port>` so it can tell its clients the public address;
+- changing the list recreates a running container (a few seconds of downtime), and UDP has no encryption or password of its own.
+
 **Restarts.** Customer containers are no longer stopped when Morline stops. After Morline starts it adopts the containers
 that are still running and starts any that are missing. Set `STOP_SERVICES_ON_EXIT=1` to get the old behaviour on a dev machine.

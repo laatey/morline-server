@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { udpPublishSpecs, udpEnv } from './public-udp.js';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -213,7 +214,7 @@ export class ContainerSupervisor {
     await this.stopService(serviceId, false);
     const targetPort = Number(networking.target_port || service.port || 3000);
     const variables = this.variables(service.environment_id, serviceId);
-    const envFile = this.writeEnvFile(serviceId, { ...variables, PORT: String(targetPort), NODE_ENV: 'production' });
+    const envFile = this.writeEnvFile(serviceId, { ...variables, ...udpEnv(serviceId), PORT: String(targetPort), NODE_ENV: 'production' });
     const name = containerName(serviceId);
     const args = ['run', '-d', '--name', name, '--network', NETWORK, '--network-alias', name,
       '--label', `morline.service_id=${serviceId}`, '--label', `morline.deployment_id=${deploymentId}`,
@@ -229,6 +230,8 @@ export class ContainerSupervisor {
     if (settings.cpu_limit) args.push('--cpus', String(settings.cpu_limit));
     // Public TCP access: Docker publishes the service's port on the host under its own public port.
     if (networking.tcp_proxy_port) args.push('--publish', `${networking.tcp_proxy_port}:${targetPort}`);
+    // Public UDP access: one published port per mapping, e.g. 31000:1812/udp.
+    for (const spec of udpPublishSpecs(serviceId)) args.push('--publish', spec);
     args.push(image);
 
     await run('docker', args);
@@ -279,15 +282,16 @@ export class ContainerSupervisor {
     await this.ensureNetwork();
     await this.stopService(serviceId, false);
     const targetPort = Number(networking.target_port || service.port || 3000);
-    const envFile = this.writeEnvFile(serviceId, { ...this.variables(service.environment_id, serviceId), PORT: String(targetPort), NODE_ENV: 'production' });
+    const envFile = this.writeEnvFile(serviceId, { ...this.variables(service.environment_id, serviceId), ...udpEnv(serviceId), PORT: String(targetPort), NODE_ENV: 'production' });
     const alias = containerName(serviceId);
     const project = `morline-${safeName(serviceId)}`;
     const overridePath = path.join(APPS_DIR, serviceId, '.morline', 'compose.runtime.yml');
+    const publishedPorts = [...(networking.tcp_proxy_port ? [`${networking.tcp_proxy_port}:${targetPort}`] : []), ...udpPublishSpecs(serviceId)];
     const override = {
       services: Object.fromEntries(entries.map(([name]) => [name, {
         env_file: [hostWorkspacePath(envFile)],
         networks: { [NETWORK]: { aliases: name === selected ? [alias] : [] } },
-        ...(name === selected && networking.tcp_proxy_port ? { ports: [`${networking.tcp_proxy_port}:${targetPort}`] } : {}),
+        ...(name === selected && publishedPorts.length ? { ports: publishedPorts } : {}),
         labels: { 'morline.service_id': serviceId, 'morline.deployment_id': deploymentId }
       }])),
       networks: { [NETWORK]: { external: true, name: NETWORK } }

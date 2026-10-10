@@ -1375,12 +1375,18 @@ paths:
         "200": { description: Networking, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
     patch:
       tags: [Domains]
-      summary: Change target port, toggle public HTTP, or open/close a public TCP port
+      summary: Change target port, toggle public HTTP, open/close a public TCP port, or set public UDP ports
       description: |
         `tcpProxy.enabled: true` gives the service its own port on the public address (for databases and other non-HTTP
         services). Docker publishes it when the container is created, so a running service is recreated, which takes a
         few seconds; the response then has `restarting: true`. Known databases must have a password set first
         (`409 password_required`).
+
+        `udpPorts` is the full list of UDP ports the service listens on inside its container (for RADIUS, WireGuard, DNS...).
+        Each gets its own port in the public UDP range (`UDP_PROXY_PORTS`, default 31000-31999), published by Docker like the
+        TCP proxy, so a running service is recreated (`restarting: true`). Send `[]` to close all of them. The app also
+        receives `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<container port>` so it knows its public address.
+        More than 8 ports or an invalid port gives `400 validation_failed`; a full range gives `409 no_udp_ports_left`.
       requestBody:
         required: true
         content:
@@ -1391,6 +1397,11 @@ paths:
                 targetPort: { type: integer, minimum: 1, maximum: 65535 }
                 public: { type: boolean }
                 tcpProxy: { type: object, properties: { enabled: { type: boolean } } }
+                udpPorts:
+                  type: array
+                  maxItems: 8
+                  items: { type: integer, minimum: 1, maximum: 65535 }
+                  description: Container UDP ports to expose. Replaces the current list.
       responses:
         "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Networking" } } } }
   /services/{serviceId}/domains:
@@ -2712,6 +2723,20 @@ components:
             host: { type: string, example: edge.morline.space }
             port: { type: [integer, "null"], example: 30000 }
             address: { type: [string, "null"], example: "edge.morline.space:30000" }
+        udpProxy:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            host: { type: string, example: edge.morline.space }
+            range: { type: object, properties: { from: { type: integer, example: 31000 }, to: { type: integer, example: 31999 } } }
+            ports:
+              type: array
+              items:
+                type: object
+                properties:
+                  containerPort: { type: integer, example: 1812 }
+                  port: { type: integer, example: 31000, description: Public UDP port }
+                  address: { type: string, example: "edge.morline.space:31000" }
         restarting: { type: boolean, description: Present when the change recreated the container }
         privatePort: { type: [integer, "null"] }
 

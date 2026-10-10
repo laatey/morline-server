@@ -74,6 +74,14 @@ function applyMigrations(db) {
   if (!netCols.includes('tcp_proxy_port')) db.exec('ALTER TABLE service_networking ADD COLUMN tcp_proxy_port INTEGER;');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_networking_tcp_port ON service_networking(tcp_proxy_port) WHERE tcp_proxy_port IS NOT NULL;');
 
+  // Public UDP ports for a service (RADIUS, WireGuard, DNS...). One row per exposed container port.
+  db.exec(`CREATE TABLE IF NOT EXISTS service_udp_ports (
+    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    container_port INTEGER NOT NULL,
+    public_port INTEGER NOT NULL UNIQUE,
+    PRIMARY KEY (service_id, container_port)
+  );`);
+
   // Service app type, stop support, and the "created" status for never-deployed services
   const serviceCols = db.prepare('PRAGMA table_info(services);').all().map(c => c.name);
   if (!serviceCols.includes('framework')) db.exec('ALTER TABLE services ADD COLUMN framework TEXT;');

@@ -13,6 +13,7 @@ import { eventBus } from '../engine/event-bus.js';
 import { reviveFromStop } from '../engine/service-lifecycle.js';
 import { privateHostname } from '../engine/private-network.js';
 import { tcpProxyInfo, enableTcpProxy, disableTcpProxy } from '../engine/public-tcp.js';
+import { udpProxyInfo, parseUdpPorts, setUdpPorts } from '../engine/public-udp.js';
 import { defaultBranchOf, parseGithubUrl } from '../services/github-url.js';
 import { normalizeHost, hostProblem, newToken, dnsRecordsFor } from '../engine/domain-manager.js';
 import { listRepoDirectories } from '../services/repo-directories.js';
@@ -457,16 +458,18 @@ function networkingResponse(service, net, domainRows, extra = {}) {
     privatePort: net?.target_port || service.port || 3000,
     // Reachable from anywhere over plain TCP (databases, Redis...). Off until the user turns it on.
     tcpProxy: tcpProxyInfo(net),
+    // UDP ports the service listens on, each published on its own public port (RADIUS, WireGuard, DNS...).
+    udpProxy: udpProxyInfo(service.id),
     ...extra
   };
 }
 
 // PATCH /services/:serviceId/networking
-// Body: { targetPort?, public?, tcpProxy?: { enabled: boolean } }
+// Body: { targetPort?, public?, tcpProxy?: { enabled: boolean }, udpPorts?: number[] }  (udpPorts replaces the whole list)
 router.patch('/services/:serviceId/networking', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
-    const { targetPort, public: isPublic, tcpProxy } = req.body || {};
+    const { targetPort, public: isPublic, tcpProxy, udpPorts } = req.body || {};
 
     if (targetPort !== undefined) {
       const port = Number(targetPort);
@@ -492,6 +495,12 @@ router.patch('/services/:serviceId/networking', async (req, res, next) => {
       const after = queryOne('SELECT tcp_proxy_port FROM service_networking WHERE service_id = ?', service.id)?.tcp_proxy_port || null;
       // The port is published when the container is created, so a running service is recreated (a few seconds of downtime).
       needsRestart = before !== after && containerSupervisor.isServiceRunning(service.id);
+    }
+
+    if (udpPorts !== undefined) {
+      // The ports are published when the container is created, so a running service is recreated.
+      const changed = setUdpPorts(service.id, parseUdpPorts(udpPorts));
+      needsRestart = needsRestart || (changed && containerSupervisor.isServiceRunning(service.id));
     }
 
     if (needsRestart) {
