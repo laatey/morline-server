@@ -75,7 +75,7 @@ export async function detectCloudflare(host) {
         name: 'Cloudflare',
         apex,
         subdomain,
-        autoConfigUrl: `https://dash.cloudflare.com/domainconnect/v2/domainTemplates/providers/morline/services/app/apply?domain=${encodeURIComponent(apex)}&subdomain=${encodeURIComponent(subdomain)}`
+        autoConfigUrl: 'https://dash.cloudflare.com/'
       };
     }
   } catch (_) {}
