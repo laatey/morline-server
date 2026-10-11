@@ -1,3 +1,13 @@
+# Morline server: engineering rules
+
+- Plain Node.js ESM (Node 22+), Express 4, no build step. SQLite through `node:sqlite` via the helpers in `src/db/index.js` (`queryOne`, `queryAll`, `execute`); schema changes go in `src/db/schema.sql`.
+- `openapi/openapi.yaml` is the contract. Change a route and its spec entry together, and keep the error shape (`{ code, message, fields, details, requestId }`) by using the helpers in `src/middleware/error-handler.js`.
+- Docker is the only runtime for customer workloads: builds and containers go through `src/engine/container-supervisor.js`. Don't reintroduce host-process execution of customer code.
+- Canvas edits that need a deploy are recorded as staged changes (`src/services/staged-changes-helper.js`), not applied immediately.
+- Secrets come from the environment only. Never add a default value for a key, token or password in `src/config.js`, and document every new variable in `.env.example`.
+- New routes that reference a team-owned resource need its kind added to `src/middleware/tenancy.js` (path rule or field) so cross-team access stays blocked.
+- Tests are `node:test` files in `test/`; run `npm test` before shipping. Real AWS identifiers stay out of git (`deploy-wizard/config.json` is ignored).
+
 <!-- BEGIN AWS Agent Toolkit rules -->
 # AWS Guidance for the new AWS experience
 

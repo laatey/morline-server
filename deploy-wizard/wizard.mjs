@@ -28,7 +28,12 @@ if (flag('help') || flag('h')) {
   process.exit(0);
 }
 
-const cfg = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8'));
+const CONFIG_PATH = path.join(HERE, 'config.json');
+if (!fs.existsSync(CONFIG_PATH)) {
+  console.error('deploy-wizard/config.json not found. Copy config.example.json to config.json and fill in your AWS details.');
+  process.exit(1);
+}
+const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 if (option('profile')) cfg.profile = option('profile');
 if (option('region')) cfg.region = option('region');
 const yes = flag('yes');

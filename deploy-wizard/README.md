@@ -33,7 +33,7 @@ Needs Node 18+, `git`, and the AWS CLI on your PATH.
 
 ## Settings
 
-`config.json`: profile, region, bucket, instance id, deploy path, compose file.
+`config.json` (copy it from `config.example.json`; it is git-ignored so your AWS identifiers stay local): profile, region, bucket, instance id, deploy path, compose file.
 Set `healthUrl` (e.g. your API's `/health`) to have the wizard confirm the site answers.
 
 ## If a deploy fails

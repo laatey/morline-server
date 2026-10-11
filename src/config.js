@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 export const ROOT_DIR = path.resolve(__dirname, '..');
 
-// Railway Persistent Volume support: default to /data if directory exists on Linux
+// Default to /data when it exists on Linux (the production container mounts the host data dir there)
 const defaultDataDir = (process.platform !== 'win32' && fs.existsSync('/data'))
   ? '/data'
   : path.join(ROOT_DIR, 'data');
@@ -22,7 +22,7 @@ export const PORT = parseInt(process.env.PORT || '3001', 10);
 export const HOST = process.env.HOST || '0.0.0.0';
 export const BASE_DOMAIN = process.env.BASE_DOMAIN || 'morline.space';
 
-// Auto-detect public URL from Railway environment variables or BASE_DOMAIN
+// Public URL: explicit PUBLIC_URL, else a Railway-provided domain (legacy), else api.<BASE_DOMAIN>
 export const PUBLIC_URL = process.env.PUBLIC_URL ||
   (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null) ||
   (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : null) ||
@@ -35,7 +35,7 @@ export const FRONTEND_URL = process.env.FRONTEND_URL ||
 // Resend email API
 export const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
 
-// Cloudflare Tunnel Token (optional, for token-based cloudflared tunnel execution on Railway)
+// Cloudflare Tunnel Token (optional; only used when ENABLE_CLOUDFLARE_TUNNEL=true)
 export const CLOUDFLARE_TUNNEL_TOKEN = process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true'
   ? (process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN || null)
   : null;
@@ -43,9 +43,6 @@ export const CLOUDFLARE_TUNNEL_TOKEN = process.env.ENABLE_CLOUDFLARE_TUNNEL === 
 export const JWT_SECRET = process.env.JWT_SECRET || null;
 export const JWT_EXPIRES_IN = '7d';
 export const REFRESH_EXPIRES_DAYS = 30;
-
-export const SERVICE_PORT_MIN = parseInt(process.env.SERVICE_PORT_MIN || '4100', 10);
-export const SERVICE_PORT_MAX = parseInt(process.env.SERVICE_PORT_MAX || '4999', 10);
 
 export const LOG_RETENTION_LINES = 10000;
 
@@ -79,7 +76,7 @@ export const GITHUB_PRIVATE_KEY = loadGitHubPrivateKey();
 
 // AI Assistant LLM Provider Configuration
 export const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || 'https://key-keeper-proxy.lovable.app/api/public/ai';
-export const AI_GATEWAY_KEY = process.env.AI_GATEWAY_KEY || 'Nii@150608';
+export const AI_GATEWAY_KEY = process.env.AI_GATEWAY_KEY || null;
 export const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || 'google/gemini-2.5-flash';
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;

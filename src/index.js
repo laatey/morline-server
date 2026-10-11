@@ -12,6 +12,10 @@ import { mapDomain } from './db/mappers.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { rateLimit } from './middleware/rate-limit.js';
+import { enforceTenancy } from './middleware/tenancy.js';
+import { verifyOAuthState } from './services/oauth-state.js';
+import { securityHeaders } from './middleware/security-headers.js';
 import { reverseProxyMiddleware } from './engine/reverse-proxy.js';
 import { containerSupervisor } from './engine/container-supervisor.js';
 import { tunnelManager } from './engine/tunnel-manager.js';
@@ -75,8 +79,11 @@ app.use(cors({
 }));
 
 // Middleware
+app.disable('x-powered-by');
+app.use(securityHeaders);
 app.use(requestIdMiddleware);
-app.use(express.json({ limit: '10mb' }));
+// rawBody is kept for GitHub webhook signature verification.
+app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Static avatars
@@ -133,8 +140,12 @@ app.get('/settings/integrations', async (req, res) => {
         }
       }
 
-      const firstTeam = queryOne('SELECT id FROM teams ORDER BY created_at ASC LIMIT 1');
-      const teamId = firstTeam?.id || 'team_default';
+      // The state was signed when the user started the connection from Morline; without it we
+      // cannot tell which team this installation belongs to, so nothing is saved.
+      const teamId = verifyOAuthState(req.query.state);
+      if (!teamId) {
+        return res.status(400).send('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Error</title></head><body style="background:#0a0a0a;color:#f87171;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh"><p>Start the GitHub connection from Morline (Settings, Integrations) so we know which team it belongs to.</p></body></html>');
+      }
       const now = new Date().toISOString();
 
       execute(`
@@ -205,7 +216,11 @@ app.get('/settings/integrations', async (req, res) => {
 
 // Mount /v1 Router
 const v1 = express.Router();
+v1.use(rateLimit({ windowMs: 60_000, max: Number(process.env.RATE_LIMIT_API_PER_MIN) || 1200 }));
+// Credential endpoints get a much tighter budget per IP (brute force, signup and reset spam).
+v1.use('/auth', rateLimit({ windowMs: 60_000, max: Number(process.env.RATE_LIMIT_AUTH_PER_MIN) || 30, message: 'Too many attempts, try again in a minute' }));
 v1.use(authenticate);
+v1.use(enforceTenancy);
 
 v1.use('/', templatesRouter);
 v1.use('/auth', authRouter);

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { udpPublishSpecs, udpEnv } from './public-udp.js';
+import { hardeningArgs } from './container-hardening.js';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -226,8 +227,7 @@ export class ContainerSupervisor {
       fs.mkdirSync(hostDir, { recursive: true });
       args.push('--volume', `${hostDir}:${volume.mount_path}`);
     }
-    if (settings.memory_limit_mb) args.push('--memory', `${settings.memory_limit_mb}m`);
-    if (settings.cpu_limit) args.push('--cpus', String(settings.cpu_limit));
+    args.push(...hardeningArgs(settings));
     // Public TCP access: Docker publishes the service's port on the host under its own public port.
     if (networking.tcp_proxy_port) args.push('--publish', `${networking.tcp_proxy_port}:${targetPort}`);
     // Public UDP access: one published port per mapping, e.g. 31000:1812/udp.

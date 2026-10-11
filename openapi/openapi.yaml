@@ -21,7 +21,7 @@ info:
       deployments, logs, metrics and domains are environment-scoped.
 servers:
   - url: https://api.morline.space/v1
-    description: Production API (Railway + Cloudflare Tunnel)
+    description: Production API
   - url: http://localhost:3001/v1
     description: Local Development Server
   - url: /v1

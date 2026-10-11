@@ -5,6 +5,9 @@ import { requireAuth } from '../middleware/auth.js';
 import { validationError, conflict } from '../middleware/error-handler.js';
 import { GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_APP_NAME, GITHUB_PRIVATE_KEY, GITHUB_TOKEN, PUBLIC_URL, FRONTEND_URL } from '../config.js';
 import { buildManager } from '../engine/build-manager.js';
+import { signOAuthState, verifyOAuthState } from '../services/oauth-state.js';
+import { verifyWebhookSignature } from '../services/github-webhook.js';
+import { GITHUB_WEBHOOK_SECRET } from '../config.js';
 import {
   generateGitHubAppJwt,
   getInstallationToken,
@@ -38,7 +41,8 @@ function renderPopupSuccess(res) {
 // Callback (public endpoint, called by GitHub redirect for OAuth or App Installation)
 router.get('/callback', async (req, res, next) => {
   try {
-    const { code, state: teamId, installation_id, setup_action, error } = req.query;
+    const { code, state, installation_id, setup_action, error } = req.query;
+    const teamId = verifyOAuthState(state); // null unless Morline signed this state
 
     if (error) {
       return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
@@ -67,19 +71,7 @@ router.get('/callback', async (req, res, next) => {
         }
       }
 
-      let targetTeamId = teamId;
-      if (!targetTeamId) {
-        const existing = queryOne('SELECT team_id FROM github_integration WHERE account = ?', account);
-        if (existing) {
-          targetTeamId = existing.team_id;
-        } else {
-          const u = queryOne('SELECT tm.team_id FROM team_members tm JOIN users u ON u.id = tm.user_id WHERE u.email LIKE ? OR u.username LIKE ?', `${account}%`, `${account}%`);
-          if (u) {
-            targetTeamId = u.team_id;
-          }
-        }
-      }
-
+      const targetTeamId = teamId;
       if (!targetTeamId) {
         return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent('Missing teamId in GitHub installation callback state')}`);
       }
@@ -100,7 +92,7 @@ router.get('/callback', async (req, res, next) => {
 
     // Case 2: OAuth Code Exchange callback
     if (code) {
-      if (!teamId || teamId.startsWith('http') || teamId.includes('{') || teamId.length > 32) {
+      if (!teamId) { // not one of our signed team states: it's a sign-in OAuth callback
         const { handleGitHubOAuthCallback } = await import('./auth.js');
         return handleGitHubOAuthCallback(req, res);
       }
@@ -168,7 +160,7 @@ router.get('/callback', async (req, res, next) => {
 
       // If GitHub App is configured and not yet installed by this user, guide them to install it
       if (!installationId && GITHUB_APP_NAME) {
-        return res.redirect(`https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`);
+        return res.redirect(`https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${encodeURIComponent(signOAuthState(teamId))}`);
       }
 
       return renderPopupSuccess(res);
@@ -182,6 +174,13 @@ router.get('/callback', async (req, res, next) => {
 
 // POST /integrations/github/webhook (public webhook endpoint from GitHub)
 router.post('/webhook', async (req, res) => {
+  if (!GITHUB_WEBHOOK_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ error: 'GITHUB_WEBHOOK_SECRET is not configured; refusing unsigned webhooks' });
+    }
+  } else if (!verifyWebhookSignature(GITHUB_WEBHOOK_SECRET, req.rawBody, req.headers['x-hub-signature-256'])) {
+    return res.status(401).json({ error: 'Invalid webhook signature' });
+  }
   const event = req.headers['x-github-event'];
   if (event !== 'push') {
     return res.status(200).json({ received: true, ignored: `Event ${event} not handled` });
@@ -289,9 +288,9 @@ router.get('/', async (req, res, next) => {
     }
 
     // Prefer OAuth authorize first: if user already has app installed, it connects seamlessly without asking to reinstall!
-    let installUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,read:user&state=${teamId}`;
+    let installUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,read:user&state=${encodeURIComponent(signOAuthState(teamId))}`;
     if (!GITHUB_CLIENT_ID && GITHUB_APP_NAME) {
-      installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${teamId}`;
+      installUrl = `https://github.com/apps/${GITHUB_APP_NAME}/installations/new?state=${encodeURIComponent(signOAuthState(teamId))}`;
     }
 
     return res.json({

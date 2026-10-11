@@ -647,54 +647,6 @@ server.listen(port, '0.0.0.0', () => {
     }
   }
 
-  async _requireTools(ctx, tools, env, cwd) {
-    for (const tool of tools || []) {
-      const r = await this._run(ctx, { command: `command -v ${tool}`, cwd, env, timeoutMs: 15000, quiet: true });
-      if (r.code !== 0) {
-        if (tool === 'bun' || tool === 'pnpm' || tool === 'yarn') {
-          ctx.log('info', `[Build] Tool "${tool}" not found on host; installing via npm...`);
-          const inst = await this._run(ctx, { command: `npm install -g ${tool}`, cwd, env, timeoutMs: 60000 });
-          if (inst.code === 0) {
-            ctx.log('info', `[Build] Successfully installed "${tool}"`);
-            continue;
-          }
-        }
-        throw new BuildError(`Required tool "${tool}" is not installed on the build host`);
-      }
-    }
-  }
-
-  _warnNodeVersion(ctx, workDir) {
-    const pkg = readJsonSafe(workDir, 'package.json');
-    let nvmrc = '';
-    try { nvmrc = fs.readFileSync(path.join(workDir, '.nvmrc'), 'utf-8'); } catch {}
-    const want = parseInt(String(pkg?.engines?.node || nvmrc).match(/\d+/)?.[0], 10);
-    const have = parseInt(process.versions.node, 10);
-    if (want && have < want) {
-      ctx.log('warn', `[Build] Project asks for Node ${want}+ but the build host runs Node ${process.versions.node}`);
-    }
-  }
-
-  async _phase(ctx, name, command, cwd, env, { attempts = 1, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      this._checkCancelled(ctx);
-      ctx.log('info', `[${name}] $ ${command}${attempt > 1 ? ` (attempt ${attempt}/${attempts})` : ''}`);
-
-      const r = await this._run(ctx, { command, cwd, env, timeoutMs });
-      if (r.code === 0) return;
-
-      this._checkCancelled(ctx);
-      if (r.timedOut) throw new BuildError(`${name} timed out after ${Math.round(timeoutMs / 1000)}s`);
-      if (attempt === attempts) {
-        const reason = r.error || `exit code ${r.code ?? r.signal}`;
-        const hint = r.tail.length ? ` — ${r.tail.slice(-2).join(' | ')}` : '';
-        throw new BuildError(`${name} command failed (${reason}): ${command}${hint}`);
-      }
-      ctx.log('warn', `[${name}] Failed (exit ${r.code}); retrying...`);
-      await sleep(2000);
-    }
-  }
-
   /**
    * Run a shell command (`command`) or an executable with args (`file` + `args`, no shell → no injection).
    * Streams line-buffered output to the log, enforces a timeout, and kills the entire process group.

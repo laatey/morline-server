@@ -23,7 +23,9 @@ export function extractToken(req) {
   if (req.cookies && req.cookies.token) {
     return req.cookies.token;
   }
-  if (req.query && req.query.token) {
+  // EventSource cannot set headers, so streaming GET endpoints may take ?token=. Nowhere else:
+  // URLs end up in access logs and browser history.
+  if (req.method === 'GET' && req.query && typeof req.query.token === 'string' && /\/(stream|events)$/.test(req.path)) {
     return req.query.token;
   }
   return null;

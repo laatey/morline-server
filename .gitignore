@@ -26,3 +26,6 @@ Thumbs.db
 # Certificates and keys
 *.pem
 *.key
+
+# Deploy wizard: real AWS identifiers stay local (copy config.example.json)
+deploy-wizard/config.json

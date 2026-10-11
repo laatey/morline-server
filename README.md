@@ -1,175 +1,112 @@
-# Morline API Backend Server
+# Morline Server
 
-A production-ready, open-source Railway-style application deployment platform backend server built in Node.js.
+Backend for Morline, a Railway-style platform for deploying apps and databases from a GitHub repo or Docker image. It implements the contract in [`openapi/openapi.yaml`](./openapi/openapi.yaml): 108 paths, 145 operations, 20 tags.
 
-The backend strictly conforms to [`openapi/openapi.yaml`](./openapi/openapi.yaml), implementing all **92 API endpoints (125 operations across 19 tags)** with real process execution, persistent SQLite database storage (WAL mode), port management, health checking, reverse proxying, and real-time Server-Sent Events (SSE).
+Morline clones your code, builds an OCI image (your Dockerfile, or Railpack when there isn't one), runs it as a container, health-checks it, and routes traffic to it. State lives in SQLite, so the whole platform runs from one box.
 
----
+## How a deploy works
 
-## 🚀 Key Architectural Features
+1. **Clone** the repo using a GitHub App installation token, the user's OAuth token, or `GITHUB_TOKEN`.
+2. **Detect** the project type, package manager, runtime version and start command (`project-detector`, `runtime-resolver`). Overrides come from service settings or `morline.json`.
+3. **Build** an image with `docker build` when a Dockerfile exists, otherwise with Railpack through BuildKit (`container-supervisor`).
+4. **Run** the image as a container on the environment's private Docker network, with the service's variables, volumes and resource limits.
+5. **Health-check** the configured path, then mark the deployment active. Logs and status stream over SSE the whole time.
+6. **Route** traffic by host (`<service>.<BASE_DOMAIN>` or a verified custom domain) through the built-in reverse proxy.
 
-1. **Strict OpenAPI 3.0 Contract Compliance**
-   - Full support for all schemas, cursor pagination, standard error format (`{ code, message, fields, details, requestId }`), and exact enum definitions.
-2. **Native Process Supervisor (No Mandatory Docker Required)**
-   - Applications run natively on host processes with isolated working directories in `data/apps/<serviceId>/`.
-   - Manages process lifecycle (spawn, monitor, healthcheck, graceful stop, SIGTERM/SIGKILL, auto-restart on crash).
-   - Injects environment variables (`PORT`, `DATABASE_URL`, custom environment & service variables).
-3. **Dynamic Port Manager**
-   - Allocates conflict-free host ports in the 4100–4999 range.
-   - Verifies OS port availability before assigning to child processes.
-4. **Built-in Reverse Proxy**
-   - Proxies incoming HTTP traffic on `/proxy/:serviceId/*` or `<subdomain>.localhost` directly to internal service ports.
-5. **Real-time SSE Streaming**
-   - `/v1/deployments/:deploymentId/logs/stream`: Live build & runtime logs.
-   - `/v1/environments/:environmentId/logs/stream`: Multi-service log tailing.
-   - `/v1/environments/:environmentId/events`: Live canvas & service status updates.
-   - `/v1/notifications/stream`: Real-time notification events.
-   - `/v1/assistant/threads/:threadId/messages`: Streaming AI assistant responses.
-6. **Robust SQLite Persistence**
-   - Uses Node.js native `node:sqlite` (`DatabaseSync`) with Write-Ahead Logging (WAL) and foreign keys enabled.
-   - Zero compilation or external dependencies; survives server restarts.
+Customer containers keep running when Morline restarts; on boot Morline adopts the ones still running and starts any that are missing.
 
----
+## Requirements
 
-## 📁 Directory Structure
+- Node.js 22 or newer
+- Docker with BuildKit (`docker-buildx-plugin`) and the Railpack CLI for building and running services. Without Docker the API still starts, but deploys fail. The provided `Dockerfile` installs both.
+
+## Run it
+
+```bash
+cp .env.example .env     # set JWT_SECRET at minimum
+npm ci
+npm run dev              # watch mode; use `npm start` for a plain run
+```
+
+The server listens on `http://0.0.0.0:3001`, with the API under `/v1` and a health check at `/health`.
+
+```bash
+npm test                 # runtime-resolver, volumes and UDP suites
+```
+
+Configuration is documented in [`.env.example`](./.env.example).
+
+## Code layout
 
 ```text
-morline-server/
-├── data/                    # Persistent storage (DB, apps, avatars)
-│   ├── apps/                # Isolated application workspaces
-│   └── morline.db           # SQLite WAL database
-├── openapi/
-│   └── openapi.yaml         # Morline OpenAPI 3.0 specification contract
-├── src/
-│   ├── config.js            # Ports, JWT secret, storage paths
-│   ├── index.js             # Main server entry point & router assembly
-│   ├── db/
-│   │   ├── index.js         # SQLite connection & query helpers
-│   │   ├── schema.sql       # DDL table definitions & indexes
-│   │   ├── seed.js          # Default catalog seeds (templates & regions)
-│   │   └── mappers.js       # Database row ➡️ OpenAPI camelCase mappers
-│   ├── engine/
-│   │   ├── event-bus.js     # Pub/sub event bus for SSE streams
-│   │   ├── port-manager.js  # Dynamic port allocation pool (4100–4999)
-│   │   ├── log-manager.js   # Log ring-buffer & SQLite persistence
-│   │   ├── process-supervisor.js # Child process spawning & monitoring
-│   │   ├── build-manager.js # Workspace build & deploy coordinator
-│   │   ├── reverse-proxy.js # HTTP reverse proxy to internal ports
-│   │   └── metrics-collector.js # Time-series CPU & memory metrics
-│   ├── middleware/
-│   │   ├── auth.js          # JWT verification & session tracking
-│   │   ├── error-handler.js # Standard OpenAPI error format handler
-│   │   ├── request-id.js    # X-Request-Id header & req.id assignment
-│   │   └── cursor.js        # Base64 cursor pagination helpers
-│   └── routes/              # All 19 OpenAPI domain routers
-│       ├── auth.js          # /v1/auth/*
-│       ├── users.js         # /v1/me/*
-│       ├── teams.js         # /v1/teams/*, /v1/invites/*
-│       ├── projects.js      # /v1/projects/*
-│       ├── environments.js  # /v1/environments/*
-│       ├── connections.js   # /v1/connections/*
-│       ├── services.js      # /v1/services/*, /v1/volumes/*
-│       ├── deployments.js   # /v1/deployments/*
-│       ├── domains.js       # /v1/domains/*
-│       ├── notifications.js # /v1/notifications/*
-│       ├── activity.js      # /v1/projects/:id/activity
-│       ├── search.js        # /v1/search
-│       ├── assistant.js     # /v1/assistant/*
-│       ├── github.js        # /v1/integrations/github/*
-│       └── templates.js     # /v1/templates, /v1/regions
-├── test-api.js              # Comprehensive 15-stage E2E test suite
-├── test-sse.js              # SSE streaming verification test
-└── package.json
+src/
+  index.js                 server entry, router assembly, graceful shutdown
+  config.js                environment-driven configuration
+  db/                      node:sqlite (WAL), schema.sql, seeds, row-to-API mappers
+  middleware/              auth (JWT + sessions), errors, request ids, cursor pagination
+  routes/                  one router per API domain (auth, teams, projects, environments,
+                           services, deployments, domains, assistant, github, ...)
+  services/                email, GitHub App, LLM providers, notifications, staged changes
+  templates/               starter and database template catalog
+  engine/
+    build-manager.js       clone, detect, build, deploy coordinator
+    container-supervisor.js  image builds, container lifecycle, watchdog, restore
+    project-detector.js    framework and start-command detection
+    runtime-resolver.js    runtime version resolution
+    database-manager.js    managed databases, backups, restores
+    diagnosis-manager.js   AI analysis of failed deployments
+    domain-manager.js      custom domain verification and TLS status
+    reverse-proxy.js       host-based HTTP routing to containers
+    private-network.js     per-environment Docker networks (<name>.morline.internal)
+    public-tcp.js / public-udp.js   public port allocation
+    tunnel-manager.js      optional Cloudflare Tunnel
+    metrics-collector.js, usage-meter.js, log-manager.js, event-bus.js
+test/                      node:test suites
+openapi/openapi.yaml       API contract
+edge/                      optional Caddy edge proxy for custom-domain HTTPS
+deploy-wizard/             optional one-command deploy to AWS (S3 + SSM)
+docs/DEPLOYMENT.md         production setup notes
 ```
 
----
+## API domains
 
-## 🛠️ Getting Started
+| Domain | Base path |
+|---|---|
+| Auth | `/v1/auth` (signup, login, refresh, OAuth, password reset, sessions) |
+| Users | `/v1/me` (profile, avatar, preferences, onboarding) |
+| Teams | `/v1/teams`, `/v1/invites` |
+| Projects | `/v1/projects` |
+| Environments | `/v1/environments` (canvas graph, layout, staged changes, SSE events) |
+| Services | `/v1/services`, `/v1/volumes` (lifecycle, variables, networking) |
+| Connections | `/v1/connections` |
+| Deployments | `/v1/deployments` (build, redeploy, rollback, cancel, logs) |
+| Domains | `/v1/domains` |
+| Notifications | `/v1/notifications` (including an SSE stream) |
+| Activity, Search | `/v1/projects/:id/activity`, `/v1/search` |
+| Assistant | `/v1/assistant` (threads, streaming replies, action proposals) |
+| GitHub | `/v1/integrations/github` |
+| Templates | `/v1/templates`, `/v1/regions` |
 
-### 1. Requirements
-- Node.js `v20.0.0` or higher (tested on Node.js `v24.19.0`)
-- Windows, macOS, or Linux
+## Networking
 
-### 2. Start the Server
-```bash
-# Start server in production mode
-npm start
+**Private names.** Services reach each other as `<service-name>.morline.internal`. Each environment gets its own Docker network (`morline-env-<id>`, a /26 from `PRIVATE_NET_POOL`, default `10.200.0.0/16`), so the same name in two projects never collides. If two services in one environment share a name, the older keeps the plain name and the newer gets `name-<4 chars of its id>`. Containers also join `morline-runtime` so the reverse proxy can reach them.
 
-# Or with automatic reload on changes
-npm run dev
-```
+**Public TCP** (databases, Redis, anything non-HTTP). A service can be given a public port from `TCP_PROXY_PORTS` (default `30000-30999`), published by Docker and reachable at `edge.<BASE_DOMAIN>:<port>`. It is plain TCP with no TLS, so rely on the service's own authentication.
 
-The server starts on `http://0.0.0.0:3001` with API routes mounted under `http://127.0.0.1:3001/v1`.
+**Public UDP** (RADIUS, WireGuard, DNS, game servers). Declare the container's UDP ports with `PATCH /v1/services/:id/networking` (`udpPorts: [1812, 1813]`) or from the Network tab. Each gets a public port from `UDP_PROXY_PORTS` (default `31000-31999`), tracked in `service_udp_ports`. The container receives `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<containerPort>` so it can report its own public endpoint. Changing mappings recreates the running container.
 
-### 3. Run Automated Verification Tests
-```bash
-# Run the 15-stage end-to-end integration test
-node test-api.js
+Open both port ranges in your firewall. UDP must reach the host directly, so keep it off any load balancer or CDN.
 
-# Run the real-time SSE streaming test
-node test-sse.js
-```
+## Production
 
----
+See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md). The short version: one Docker host, `docker-compose.production.yml` for the API, optionally `edge/` for HTTPS on custom domains, and `deploy-wizard/` to ship new versions.
 
-## 🔌 API Domains & Endpoints
+## Security
 
-| Domain | Base Path | Endpoints Summary |
-|---|---|---|
-| **Auth** | `/v1/auth` | Signup, login, refresh, logout, OAuth start/callback, email/password reset, session management |
-| **Users** | `/v1/me` | Current user profile, avatar upload, password change, preferences, onboarding checklist |
-| **Teams** | `/v1/teams` | Team CRUD, member roles, invite creation & acceptance, team projects |
-| **Projects** | `/v1/projects` | Project CRUD, environment listing & creation, duplication, transfer, favorites, spend metrics |
-| **Environments**| `/v1/environments`| Environment CRUD, status, live SSE event stream, canvas graph, canvas layout & viewport |
-| **Services** | `/v1/services` | Service CRUD, duplicate, restart, sleep, wake, service variables, volumes, networking |
-| **Connections** | `/v1/connections` | Draw and configure service connections with automatic environment variable injection |
-| **Deployments** | `/v1/deployments` | List deployments, trigger build, redeploy, rollback, cancel, view & stream logs |
-| **Domains** | `/v1/domains` | Custom domains, automated DNS verification, TLS status |
-| **Notifications**| `/v1/notifications`| User notifications, mark as read, real-time SSE notification stream |
-| **Activity** | `/v1/projects/:id/activity` | Audit log feed with cursor pagination |
-| **Search** | `/v1/search` | Global command-palette search across projects, services, deployments, domains, and variables |
-| **Assistant** | `/v1/assistant` | AI assistant conversation threads, streaming SSE message generation, action proposal & apply/revert |
-| **GitHub** | `/v1/integrations/github` | Team GitHub connection status, repo listing, branch detection, framework auto-detection |
-| **Templates** | `/v1/templates`, `/v1/regions` | Catalogues for starters (Next.js, Vite, Python FastAPI, Go, Rust, Express) and databases (Postgres, Redis, MySQL, MongoDB, SQLite) |
-
-## Networking: Private Networks, Public TCP & Public UDP
-
-**Private names.** Every service is reachable from the other services of its environment as
-`<service-name>.morline.internal`. Each environment gets its own Docker network (`morline-env-<id>`, a /26 taken from
-`PRIVATE_NET_POOL`, default `10.200.0.0/16`), so the same name in two projects never mixes them up. If two services in one
-environment share a name, the older keeps `name.morline.internal` and the newer gets `name-<4 chars of its id>`.
-Containers also stay on the shared `morline-runtime` network so the reverse proxy can reach them.
-
-**Public TCP (databases, Redis, etc.).** A service can be given a public port from `TCP_PROXY_PORTS` (default `30000-30999`),
-published by Docker straight from its container.
-- Accessible directly via `edge.<BASE_DOMAIN>:<port>` (e.g. `edge.morline.space:30001`).
-- AWS EC2 Security Group allows inbound TCP `30000-30999`.
-- Connection is plain TCP (no TLS), relying on service-level authentication.
-
-**Public UDP (RADIUS, WireGuard, DNS, game servers...).** A service can declare the UDP ports it listens on inside its container (`PATCH /v1/services/:id/networking` with `udpPorts: [1812, 1813]`, or via the Network tab in the dashboard).
-- **Port Allocation**: Each exposed port receives a dedicated public port from `UDP_PROXY_PORTS` (default `31000-31999`), tracked in the SQLite table `service_udp_ports`.
-- **Docker Publishing**: Published directly by Docker via `--publish <publicPort>:<containerPort>/udp`.
-- **Environment Injection**: The container automatically receives `MORLINE_PUBLIC_UDP_HOST` and `MORLINE_PUBLIC_UDP_PORT_<containerPort>` so applications can discover and report their own public endpoints.
-- **Service Recreation**: Changing UDP mappings safely recreates running containers to bind host sockets.
-
----
-
-## ☁️ AWS Production Infrastructure Configuration
-
-The production backend runs on AWS EC2 (`eu-north-1`, instance `i-060640ca39b79f9fa`):
-
-1. **Security Group (`morline-api-public` / `sg-0acf0ec08f7679cca`)**:
-   - `TCP 80`: HTTP traffic (Caddy edge proxy)
-   - `TCP 443`: HTTPS traffic with automated on-demand TLS
-   - `TCP 30000-30999`: Public TCP proxy for databases and TCP services
-   - `UDP 31000-31999`: Public UDP proxy for UDP services (Rule ID: `sgr-031c70104b22f7981`)
-2. **Direct Edge Routing**:
-   - `edge.morline.space` resolves directly to the EC2 Elastic IP (`13.63.17.173`).
-   - UDP bypasses Application Load Balancers and Cloudflare CDN proxies to ensure unfiltered datagram delivery.
-3. **Automated Deploy Pipeline (`deploy-wizard/`)**:
-   - Deploys source packages directly via AWS S3 bucket `morline-deploy-602480250061-eu-north-1` and AWS Systems Manager (SSM) agent.
-   - Builds production containers using `docker-compose.production.yml` and `edge/docker-compose.edge.yml`.
-   - Health checks verify API liveness at `https://api.morline.space/health`.
-
-**Restarts & Persistence.** Customer containers are no longer stopped when Morline stops. After Morline starts it adopts the containers
-that are still running and starts any that are missing. Set `STOP_SERVICES_ON_EXIT=1` to get the old behaviour on a dev machine.
+- **Tenant isolation** is enforced in one place, `src/middleware/tenancy.js`: any resource a request references (path, query or body) must belong to a team the caller is in. `test/tenancy.test.js` covers it.
+- **Rate limiting**: 30 requests/minute per IP on `/v1/auth`, 1200 on the rest of the API (tune with `RATE_LIMIT_*`).
+- **Customer containers** get default memory/CPU limits, a pids limit, `no-new-privileges` and a trimmed capability set (`MORLINE_HARDEN=0` turns this off).
+- **GitHub**: push webhooks must carry a valid `X-Hub-Signature-256`, and install/OAuth redirects carry a signed, 15-minute `state`, so a team can't be hijacked by guessing its id.
+- Bearer tokens are only accepted in the query string on streaming GET endpoints (`.../stream`, `.../events`).
+- The API container mounts `/var/run/docker.sock` so it can build and run workloads, and customer containers share that host. Treat the Docker host as dedicated to Morline, and run builds on a separate machine before taking untrusted code at scale.
+- Never commit `.env`, GitHub private keys, or `deploy-wizard/config.json`; all three are git-ignored.

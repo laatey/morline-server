@@ -1,11 +1,11 @@
 {
   "profile": "morline",
   "region": "eu-north-1",
-  "bucket": "morline-deploy-602480250061-eu-north-1",
-  "instanceId": "i-060640ca39b79f9fa",
+  "bucket": "morline-deploy-<aws-account-id>-eu-north-1",
+  "instanceId": "i-xxxxxxxxxxxxxxxxx",
   "deployRoot": "/opt/morline",
   "composeFile": "docker-compose.production.yml -f edge/docker-compose.edge.yml",
-  "healthUrl": "https://api.morline.space/health",
+  "healthUrl": "https://api.example.com/health",
   "pollSeconds": 5,
   "timeoutMinutes": 20
 }
