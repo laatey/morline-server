@@ -20,6 +20,7 @@ import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
 import { APPS_DIR, DATA_DIR, BASE_DOMAIN } from '../config.js';
 import { validateLimits } from '../engine/capacity.js';
+import { isValidImageRef } from '../engine/image-ref.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
 const router = Router();
@@ -117,7 +118,11 @@ router.patch('/services/:serviceId', (req, res, next) => {
       if (source.repo) { updates.push('source_repo = ?'); params.push(source.repo); }
       if (source.branch) { updates.push('source_branch = ?'); params.push(source.branch); }
       if (source.rootDirectory) { updates.push('source_root_dir = ?'); params.push(source.rootDirectory); }
-      if (source.image) { updates.push('source_image = ?'); params.push(source.image); }
+      if (source.image) {
+        const image = String(source.image).trim();
+        if (!isValidImageRef(image)) throw validationError('That does not look like a Docker image reference', { 'source.image': 'Use the form name:tag' });
+        updates.push('source_image = ?'); params.push(image);
+      }
       if (source.display) { updates.push('source_display = ?'); params.push(source.display); }
     }
 

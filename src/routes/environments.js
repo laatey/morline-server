@@ -11,6 +11,7 @@ import { eventBus } from '../engine/event-bus.js';
 import { logManager } from '../engine/log-manager.js';
 import { metricsCollector } from '../engine/metrics-collector.js';
 import { buildManager } from '../engine/build-manager.js';
+import { isValidImageRef, defaultNameFromImage } from '../engine/image-ref.js';
 import stagedChangesRouter from './staged-changes.js';
 import { createStagedChange } from '../services/staged-changes-helper.js';
 
@@ -238,13 +239,26 @@ router.post('/:environmentId/services', async (req, res, next) => {
     const env = getEnvironment(req.params.environmentId);
     const { name, templateId, source, position, settings, variables, deploy = true } = req.body || {};
 
-    const serviceName = name || (templateId ? templateId : 'service') + '-' + Math.floor(100 + Math.random() * 900);
+    // Docker image sources: validate the reference and port up front, with errors the form can show.
+    const isImage = source?.type === 'image' || source?.type === 'docker';
+    if (isImage) {
+      const image = String(source.image || '').trim();
+      if (!image) throw validationError('Enter a Docker image, for example nginx:latest', { 'source.image': 'Required' });
+      if (!isValidImageRef(image)) throw validationError('That does not look like a Docker image reference', { 'source.image': 'Use the form name:tag, e.g. ghcr.io/acme/app:1.0' });
+      if (source.port != null && source.port !== '' && !(Number.isInteger(Number(source.port)) && Number(source.port) > 0 && Number(source.port) < 65536)) {
+        throw validationError('Port must be between 1 and 65535', { 'source.port': 'Invalid port' });
+      }
+      source.image = image;
+    }
+    const imagePort = isImage && source.port ? Number(source.port) : null;
+
+    const serviceName = name || (isImage ? defaultNameFromImage(source.image) : (templateId ? templateId : 'service')) + (name || isImage ? '' : '-' + Math.floor(100 + Math.random() * 900));
     const serviceId = `srv_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
 
     const posX = position?.x || 100;
     const posY = position?.y || 100;
-    const sourceType = source?.type || (templateId ? 'template' : 'template');
+    const sourceType = isImage ? 'image' : (source?.type || (templateId ? 'template' : 'template'));
     // A pasted GitHub URL (optionally .../tree/<branch>/<folder>) is cloned anonymously.
     const fromUrl = await resolveGithubSource(source?.url || source?.repo);
     const sourceRepo = fromUrl?.repo || source?.repo || null;
@@ -254,10 +268,10 @@ router.post('/:environmentId/services', async (req, res, next) => {
     const sourceRootDir = source?.rootDirectory || fromUrl?.rootDirectory || null;
     const sourceImage = source?.image || null;
     const sourceTemplateId = templateId || source?.templateId || null;
-    const sourceDisplay = source?.display || serviceName;
+    const sourceDisplay = source?.display || (isImage ? source.image : serviceName);
     const isGithubImport = source?.type === 'github' || Boolean(sourceUrl);
 
-    let logo = 'js';
+    let logo = isImage ? 'docker' : 'js';
     let kind = 'app';
     if (sourceTemplateId) {
       const tmpl = queryOne('SELECT * FROM templates WHERE id = ?', sourceTemplateId);
@@ -284,8 +298,8 @@ router.post('/:environmentId/services', async (req, res, next) => {
 
       execute(`
         INSERT INTO service_networking (service_id, public, target_port)
-        VALUES (?, 1, 3000)
-      `, serviceId);
+        VALUES (?, 1, ?)
+      `, serviceId, isImage ? imagePort : 3000); // image services without a port auto-detect it at deploy time
 
       // Ingest variables
       if (Array.isArray(variables)) {

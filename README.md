@@ -29,6 +29,8 @@ It needs an AI provider key (see `.env.example`) and the team's GitHub connectio
 
 CPU and memory sliders draw on what the host has left: its CPUs and RAM, minus a reserve for the OS and Morline, minus every running service's allocation (`GET /v1/infrastructure/capacity`). Raising a limit past what's free is rejected by the API, and changes are applied to the running container without a redeploy. Tune the reserve with `MORLINE_RESERVED_*` or cap the pool with `MORLINE_CAPACITY_*`.
 
+**Docker image services** skip clone and build: Morline pulls the image (public registries), uses the port you gave or the one the image exposes, and runs it with the same variables, volumes, limits and health checks. Image references are validated before they reach the Docker CLI.
+
 ## Requirements
 
 - Node.js 22 or newer

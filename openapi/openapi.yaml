@@ -2307,7 +2307,8 @@ components:
             branch: { type: string }
             rootDirectory: { type: string }
         templateId: { type: string, description: Required when source=template or database }
-        image: { type: string, description: "Required when source=docker, e.g. redis:7-alpine" }
+        image: { type: string, description: "Required when source=image (alias: docker). A public image reference such as redis:7-alpine; pulled and run as-is, no build." }
+        port: { type: integer, minimum: 1, maximum: 65535, description: "source=image only. Container port to route to; detected from the image when omitted." }
     UpdateProjectInput:
       type: object
       properties:
@@ -2450,8 +2451,6 @@ components:
         restartPolicy: { type: string, enum: [always, on_failure, never] }
         replicas: { type: integer, minimum: 0, maximum: 50 }
         region: { type: string }
-        cpuLimit: { type: number }
-        memoryLimitMb: { type: integer }
         cronSchedule: { type: [string, "null"] }
         sleepWhenIdle: { type: boolean }
     CreateServiceInput:

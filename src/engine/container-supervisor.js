@@ -256,6 +256,22 @@ export class ContainerSupervisor {
     }
   }
 
+  /** `docker pull`, streaming progress lines to `onLog`. Throws a message a user can act on. */
+  async pullImage(image, onLog = () => {}) {
+    try {
+      await run('docker', ['pull', image], { onLine: (level, line) => { if (line.trim()) onLog('info', line); } });
+    } catch (err) {
+      const detail = String(err.message || '');
+      if (/unauthorized|denied|authentication required/i.test(detail)) {
+        throw new Error(`Could not pull ${image}: the registry refused access. Only public images are supported right now.`);
+      }
+      if (/not found|manifest unknown|no such|repository does not exist/i.test(detail)) {
+        throw new Error(`Could not pull ${image}: that image or tag does not exist. Check the name and tag.`);
+      }
+      throw new Error(`Could not pull ${image}: ${detail.split('\n').pop() || 'unknown error'}`);
+    }
+  }
+
   /** Apply a service's current CPU/memory limits to its running container (`docker update`). */
   async applyResourceLimits(serviceId) {
     const info = this.processes.get(serviceId);

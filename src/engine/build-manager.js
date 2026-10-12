@@ -224,6 +224,11 @@ server.listen(port, '0.0.0.0', () => {
       execute("UPDATE services SET status = 'deploying' WHERE id = ?", serviceId);
       ctx.emit('service.status', { id: serviceId, status: 'deploying' });
     }
+    // A prebuilt image skips clone and build: pull it and run it.
+    if (service.source_type === 'image' && service.source_image) {
+      await this._deployImage(ctx, service, settings);
+      return;
+    }
     ctx.log('info', `[Build] Preparing build in workspace ${ctx.cwd}`);
 
     // 1. Source
@@ -330,6 +335,40 @@ server.listen(port, '0.0.0.0', () => {
       ctx.log('info', `[Deploy] Starting container image: ${deployment.image}`);
       await containerSupervisor.startService(serviceId, deploymentId, { image: deployment.image });
     }
+  }
+
+  // ------------------------------------------------------------------ source: docker image
+
+  async _deployImage(ctx, service, settings) {
+    const { serviceId, deploymentId } = ctx;
+    const image = service.source_image.trim();
+    ctx.log('info', `[Image] Pulling ${image}`);
+    await containerSupervisor.pullImage(image, (level, message) => ctx.log(level, `[Image] ${message}`));
+    this._checkCancelled(ctx);
+
+    // No port given when the service was added: use what the image says it listens on.
+    const networking = queryOne('SELECT target_port FROM service_networking WHERE service_id = ?', serviceId) || {};
+    if (!networking.target_port) {
+      const [port] = await containerSupervisor.exposedPorts(image);
+      if (port) {
+        execute('UPDATE service_networking SET target_port = ? WHERE service_id = ?', port, serviceId);
+        execute('UPDATE services SET port = ? WHERE id = ?', port, serviceId);
+        ctx.log('info', `[Image] ${image} exposes port ${port}; routing traffic there`);
+      } else {
+        ctx.log('warn', `[Image] ${image} does not declare a port. Set the target port in the service's Networking settings if it serves traffic.`);
+      }
+    }
+
+    this._saveSnapshot(ctx, service, settings, {}, {
+      builder: 'image', installCommand: null, buildCommand: null, startCommand: null, dockerfilePath: null, runtimeVersion: null
+    });
+    execute('UPDATE deployments SET image = ? WHERE id = ?', image, deploymentId);
+
+    ctx.phase = 'deploy';
+    execute('UPDATE deployments SET state = ? WHERE id = ?', 'deploying', deploymentId);
+    ctx.emit('deployment.updated', { id: deploymentId, state: 'deploying' });
+    ctx.log('info', `[Deploy] Starting container image: ${image}`);
+    await containerSupervisor.startService(serviceId, deploymentId, { image });
   }
 
   // ------------------------------------------------------------------ source: github
