@@ -12,7 +12,8 @@ const OWNER_SQL = {
   domain: 'SELECT p.team_id FROM domains d JOIN environments e ON e.id = d.environment_id JOIN projects p ON p.id = e.project_id WHERE d.id = ?',
   volume: 'SELECT p.team_id FROM volumes v JOIN services s ON s.id = v.service_id JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id WHERE v.id = ?',
   connection: 'SELECT p.team_id FROM connections c JOIN environments e ON e.id = c.environment_id JOIN projects p ON p.id = e.project_id WHERE c.id = ?',
-  thread: 'SELECT p.team_id FROM assistant_threads t JOIN projects p ON p.id = t.project_id WHERE t.id = ?'
+  thread: 'SELECT p.team_id FROM assistant_threads t JOIN projects p ON p.id = t.project_id WHERE t.id = ?',
+  action: 'SELECT p.team_id FROM assistant_actions a JOIN assistant_threads t ON t.id = a.thread_id JOIN projects p ON p.id = t.project_id WHERE a.id = ?'
 };
 
 export function ownerTeamOf(kind, id) {
@@ -34,7 +35,8 @@ const PATH_RULES = [
   [/^\/domains\/([^/]+)/, 'domain'],
   [/^\/volumes\/([^/]+)/, 'volume'],
   [/^\/connections\/([^/]+)/, 'connection'],
-  [/^\/assistant\/threads\/([^/]+)/, 'thread']
+  [/^\/assistant\/threads\/([^/]+)/, 'thread'],
+  [/^\/assistant\/actions\/([^/]+)/, 'action']
 ];
 
 // Query-string and JSON-body fields that reference a resource.

@@ -1,6 +1,6 @@
 # Morline Server
 
-Backend for Morline, a Railway-style platform for deploying apps and databases from a GitHub repo or Docker image. It implements the contract in [`openapi/openapi.yaml`](./openapi/openapi.yaml): 108 paths, 145 operations, 20 tags.
+Backend for Morline, a Railway-style platform for deploying apps and databases from a GitHub repo or Docker image. It implements the contract in [`openapi/openapi.yaml`](./openapi/openapi.yaml): 109 paths, 146 operations, 20 tags.
 
 Morline clones your code, builds an OCI image (your Dockerfile, or Railpack when there isn't one), runs it as a container, health-checks it, and routes traffic to it. State lives in SQLite, so the whole platform runs from one box.
 
@@ -14,6 +14,20 @@ Morline clones your code, builds an OCI image (your Dockerfile, or Railpack when
 6. **Route** traffic by host (`<service>.<BASE_DOMAIN>` or a verified custom domain) through the built-in reverse proxy.
 
 Customer containers keep running when Morline restarts; on boot Morline adopts the ones still running and starts any that are missing.
+
+## The assistant can build and change apps
+
+Ask in the dashboard's assistant and it routes the request: a plain answer, **build an app**, or **change the code of a service**. Nothing is applied until you approve it.
+
+- **Build an app.** It writes a complete project (Dockerfile, code, README), shows every file, and on approval creates a private GitHub repository, commits the files, creates the service (secrets such as a JWT key are generated and stored as secret variables) and deploys it. Undo removes the service and keeps the repository.
+- **Change an app.** For services that deploy from GitHub it reads the repository, proposes edits as a diff against the real files, and on approval commits to the service's branch and redeploys, or opens a pull request instead. If the branch moved after the proposal, the action goes stale rather than overwriting anything. Undo commits a revert.
+- **Safety.** File paths are validated (no traversal, no secrets files, size caps); model output is never executed by Morline; apply is limited to owners, admins and members; every apply is claimed atomically so a double click can't run it twice; failed applies resume instead of repeating finished steps.
+
+It needs an AI provider key (see `.env.example`) and the team's GitHub connection. Creating repositories uses the connected user's OAuth token for personal accounts. The implementation is in `src/services/builder/` (generation, diffs, validation), `src/services/github-repo.js` and `src/services/assistant-actions.js`.
+
+## Resources
+
+CPU and memory sliders draw on what the host has left: its CPUs and RAM, minus a reserve for the OS and Morline, minus every running service's allocation (`GET /v1/infrastructure/capacity`). Raising a limit past what's free is rejected by the API, and changes are applied to the running container without a redeploy. Tune the reserve with `MORLINE_RESERVED_*` or cap the pool with `MORLINE_CAPACITY_*`.
 
 ## Requirements
 
@@ -31,7 +45,7 @@ npm run dev              # watch mode; use `npm start` for a plain run
 The server listens on `http://0.0.0.0:3001`, with the API under `/v1` and a health check at `/health`.
 
 ```bash
-npm test                 # runtime-resolver, volumes and UDP suites
+npm test                 # resolver, volumes, UDP, auth, tenancy, hardening, builder and more
 ```
 
 Configuration is documented in [`.env.example`](./.env.example).
@@ -46,7 +60,8 @@ src/
   middleware/              auth (JWT + sessions), errors, request ids, cursor pagination
   routes/                  one router per API domain (auth, teams, projects, environments,
                            services, deployments, domains, assistant, github, ...)
-  services/                email, GitHub App, LLM providers, notifications, staged changes
+  services/                email, GitHub App and repo access, LLM, assistant actions, notifications, staged changes
+    builder/               AI app/change generation, file validation, diffs
   templates/               starter and database template catalog
   engine/
     build-manager.js       clone, detect, build, deploy coordinator
@@ -57,6 +72,8 @@ src/
     diagnosis-manager.js   AI analysis of failed deployments
     domain-manager.js      custom domain verification and TLS status
     reverse-proxy.js       host-based HTTP routing to containers
+    capacity.js            host capacity accounting for the resource sliders
+    container-hardening.js isolation flags and default limits for customer containers
     private-network.js     per-environment Docker networks (<name>.morline.internal)
     public-tcp.js / public-udp.js   public port allocation
     tunnel-manager.js      optional Cloudflare Tunnel

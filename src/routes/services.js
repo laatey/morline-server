@@ -19,6 +19,7 @@ import { normalizeHost, hostProblem, newToken, dnsRecordsFor, detectCloudflare }
 import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
 import { APPS_DIR, DATA_DIR, BASE_DOMAIN } from '../config.js';
+import { validateLimits } from '../engine/capacity.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
 const router = Router();
@@ -129,6 +130,7 @@ router.patch('/services/:serviceId', (req, res, next) => {
       if (name && name !== service.name) containerSupervisor.refreshPrivateAlias(service.id).catch(() => {});
     }
 
+    let limitsChanged = false;
     if (settings) {
       const sUpdates = [];
       const sParams = [];
@@ -149,12 +151,27 @@ router.patch('/services/:serviceId', (req, res, next) => {
       if (settings.healthcheckTimeoutSec !== undefined) { sUpdates.push('healthcheck_timeout_sec = ?'); sParams.push(settings.healthcheckTimeoutSec); }
       if (settings.restartPolicy !== undefined) { sUpdates.push('restart_policy = ?'); sParams.push(settings.restartPolicy); }
       if (settings.replicas !== undefined) { sUpdates.push('replicas = ?'); sParams.push(settings.replicas); }
+      // Resource limits: null resets to the platform default; anything else must fit in what the host has left.
+      const limitFields = [['cpuLimit', 'cpu_limit'], ['memoryLimitMb', 'memory_limit_mb']];
+      if (settings.cpuLimit !== undefined || settings.memoryLimitMb !== undefined) {
+        const cpus = settings.cpuLimit == null ? null : Number(settings.cpuLimit);
+        const memoryMb = settings.memoryLimitMb == null ? null : Number(settings.memoryLimitMb);
+        const problem = validateLimits({ serviceId: service.id, cpus, memoryMb });
+        if (problem) throw validationError(problem, { ...(settings.cpuLimit !== undefined ? { cpuLimit: problem } : {}), ...(settings.memoryLimitMb !== undefined ? { memoryLimitMb: problem } : {}) });
+        for (const [key, column] of limitFields) {
+          if (settings[key] !== undefined) { sUpdates.push(`${column} = ?`); sParams.push(settings[key] == null ? null : Number(settings[key])); }
+        }
+        limitsChanged = true;
+      }
 
       if (sUpdates.length > 0) {
         sParams.push(service.id);
         execute(`UPDATE service_settings SET ${sUpdates.join(', ')} WHERE service_id = ?`, ...sParams);
       }
     }
+
+    // Limits take effect on the running container straight away, without a redeploy.
+    if (limitsChanged) containerSupervisor.applyResourceLimits(service.id).catch((e) => console.error('[Limits]', e.message));
 
     const updated = queryOne('SELECT * FROM services WHERE id = ?', service.id);
     const detail = getServiceDetail(updated);

@@ -3,12 +3,23 @@ import crypto from 'node:crypto';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
 import { mapThread, mapMessage, mapAction, mapUserRef } from '../db/mappers.js';
 import { requireAuth } from '../middleware/auth.js';
-import { notFound, conflict, validationError } from '../middleware/error-handler.js';
-import { eventBus } from '../engine/event-bus.js';
+import { notFound, conflict, validationError, forbidden } from '../middleware/error-handler.js';
 import { logManager } from '../engine/log-manager.js';
-import { OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, GEMINI_API_KEY, ANTHROPIC_API_KEY, AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL } from '../config.js';
+import { complete, llmConfigured } from '../services/llm.js';
+import { classifyIntent, generateNewApp, generateChange } from '../services/builder/generate.js';
+import { describeChanges } from '../services/builder/diff.js';
+import { GitHubError, withGithub, getRepo, getBranchHead, listFiles, getBlobText } from '../services/github-repo.js';
+import { createAction, publicAction, applyAction, revertAction, dismissAction } from '../services/assistant-actions.js';
 
 const router = Router();
+
+/** A message as the API returns it, with the actions proposed in it. */
+function mapMessageFull(row) {
+  const m = mapMessage(row);
+  if (!m) return m;
+  m.actions = queryAll('SELECT * FROM assistant_actions WHERE message_id = ? ORDER BY created_at ASC', row.id).map(publicAction);
+  return m;
+}
 router.use('/projects/:projectId/assistant', requireAuth);
 router.use('/assistant', requireAuth);
 
@@ -43,6 +54,10 @@ router.get('/projects/:projectId/assistant/suggestions', (req, res) => {
 
   suggestions.push(
     {
+      text: 'Build a REST API with login and a SQLite database, and deploy it',
+      context: []
+    },
+    {
       text: 'How can I connect my frontend and backend services?',
       context: []
     },
@@ -75,7 +90,7 @@ function queryThreads(whereClause, params) {
     const mapped = mapThread(r, mapUserRef(user), counts);
     // Include messages array for frontend direct consumption
     const msgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', r.id);
-    mapped.messages = msgs.map(mapMessage);
+    mapped.messages = msgs.map(mapMessageFull);
     return mapped;
   });
 }
@@ -103,6 +118,8 @@ router.get('/assistant/threads', (req, res) => {
 router.post('/assistant/threads', (req, res, next) => {
   try {
     let { id, projectId, environmentId, title = 'New Conversation' } = req.body || {};
+    const existingThread = id ? queryOne('SELECT created_by FROM assistant_threads WHERE id = ?', id) : null;
+    if (existingThread?.created_by && existingThread.created_by !== req.user.id) throw forbidden('This conversation belongs to someone else');
     const threadId = id || `thd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
 
@@ -152,6 +169,8 @@ router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
   try {
     const { projectId } = req.params;
     let { id, environmentId, title = 'New Conversation' } = req.body || {};
+    const existingThread = id ? queryOne('SELECT created_by FROM assistant_threads WHERE id = ?', id) : null;
+    if (existingThread?.created_by && existingThread.created_by !== req.user.id) throw forbidden('This conversation belongs to someone else');
 
     if (!environmentId) {
       const envRow = queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', projectId);
@@ -269,21 +288,25 @@ router.get('/assistant/threads/:threadId/messages', (req, res) => {
   const items = hasMore ? rows.slice(0, limit) : rows;
 
   return res.json({
-    data: items.map(mapMessage).reverse(),
+    data: items.map(mapMessageFull).reverse(),
     hasMore
   });
 });
 
-async function generateAIResponse(thread, userContent, contextItems) {
-  // 1. Gather live platform telemetry
-  const services = queryAll(`
-    SELECT s.id, s.name, s.kind, s.status, s.port, s.primary_domain, s.source_type, s.source_repo
+// --- Replies ---------------------------------------------------------------------------------
+
+function projectServices(projectId) {
+  return queryAll(`
+    SELECT s.id, s.name, s.kind, s.status, s.port, s.primary_domain, s.source_type, s.source_repo, s.source_branch, s.environment_id
     FROM services s
     JOIN environments e ON e.id = s.environment_id
     WHERE e.project_id = ?
-  `, thread.project_id);
+  `, projectId);
+}
 
-  const crashedServices = services.filter(s => s.status === 'crashed');
+async function answerQuestion(thread, userContent, history) {
+  const services = projectServices(thread.project_id);
+  const crashedServices = services.filter((s) => s.status === 'crashed');
   const recentErrors = queryAll(`
     SELECT d.service_name, d.error_summary, d.finished_at
     FROM deployments d
@@ -297,150 +320,143 @@ async function generateAIResponse(thread, userContent, contextItems) {
   for (const s of crashedServices) {
     const logs = logManager.getLogs({ serviceId: s.id, limit: 15 });
     if (logs.length > 0) {
-      crashedLogs += `\nLogs for service ${s.name} (CRASHED):\n` + logs.map(l => `[${l.level}] ${l.message}`).join('\n');
+      crashedLogs += `\nLogs for service ${s.name} (CRASHED):\n` + logs.map((l) => `[${l.level}] ${l.message}`).join('\n');
     }
   }
 
-  const systemPrompt = `You are Morline AI Assistant, an expert DevOps and cloud infrastructure assistant built directly into the Morline platform.
-Help the developer deploy, debug, and configure their cloud services, databases, environment variables, and domains.
+  const system = `You are the Morline assistant, built into the Morline cloud platform. You help developers deploy, debug and configure services, databases, variables and domains.
 
-Current Live Platform Context:
+You can also build things: if the developer asks for a new app or API, or for a change to the code of a service that deploys from GitHub, you write the code, show them the exact files or diff, and only apply it after they approve. Mention this when it would help; don't claim to have changed anything yourself in a plain answer.
+
+Current platform context:
 - Project ID: ${thread.project_id}
-- Active Services: ${JSON.stringify(services.map(s => ({ name: s.name, kind: s.kind, status: s.status, domain: s.primary_domain })))}
-- Recent Deployment Failures: ${JSON.stringify(recentErrors)}
-${crashedLogs ? `\nRecent Crash Logs:\n${crashedLogs}` : ''}
+- Services: ${JSON.stringify(services.map((s) => ({ name: s.name, kind: s.kind, status: s.status, domain: s.primary_domain, repo: s.source_repo || null })))}
+- Recent deployment failures: ${JSON.stringify(recentErrors)}
+${crashedLogs ? `\nRecent crash logs:\n${crashedLogs}` : ''}
 
-Instructions:
-- Provide direct, concise, and technically accurate recommendations.
-- If there are crashed services or build failures, explain the root cause and provide actionable fixes.
-- Format responses in clean markdown with bash/code snippets when helpful.`;
+Be direct, concise and technically accurate. Explain root causes and give concrete fixes. Use clean markdown with code blocks where they help.`;
 
-  // 2. Fetch past conversation messages
-  const pastMsgs = queryAll(`
-    SELECT role, content FROM assistant_messages 
-    WHERE thread_id = ? ORDER BY created_at ASC LIMIT 10
-  `, thread.id);
+  try {
+    return await complete({ system, messages: [...history, { role: 'user', content: userContent }], maxTokens: 2000, temperature: 0.3 });
+  } catch (err) {
+    console.error('[Assistant]', err.message);
+    return llmConfigured()
+      ? 'I could not reach the AI provider just now. Try again in a moment.'
+      : 'The assistant is not configured on this server yet. Set AI_GATEWAY_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY in the server environment.';
+  }
+}
 
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    ...pastMsgs.map(m => ({ role: m.role, content: m.content })),
-    { role: 'user', content: userContent }
-  ];
+const firstSentence = (text, max = 72) => {
+  const s = String(text || '').replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s/)[0] || '';
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+};
 
-  // 3. Check AI Gateway Proxy first (or OpenAI, Gemini, Anthropic)
-  if (AI_GATEWAY_KEY) {
-    try {
-      const res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': AI_GATEWAY_KEY,
-          'Authorization': `Bearer ${AI_GATEWAY_KEY}`
-        },
-        body: JSON.stringify({
-          model: AI_GATEWAY_MODEL || 'google/gemini-2.5-flash',
-          messages
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content;
-        if (text) return text;
-      } else {
-        const errText = await res.text();
-        console.error('[Assistant] AI Gateway error:', res.status, errText);
-      }
-    } catch (err) {
-      console.error('[Assistant] AI Gateway Call Failed:', err.message);
-    }
+function githubConnected(teamId) {
+  return Boolean(queryOne('SELECT 1 AS ok FROM github_integration WHERE team_id = ? AND connected = 1', teamId));
+}
+
+async function proposeNewApp({ thread, team, userContent, history, progress }) {
+  const environmentId = thread.environment_id
+    || queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', thread.project_id)?.id;
+  if (!environmentId) return { text: 'This project has no environment to deploy into yet. Create one first.' };
+  if (!githubConnected(team.team_id)) {
+    return { text: 'Connect GitHub first (Settings, Integrations). I commit the generated code to a new private repository in your account, and Morline deploys from there.' };
   }
 
-  if (OPENAI_API_KEY) {
-    try {
-      const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: OPENAI_MODEL || 'gpt-4o-mini',
-          messages,
-          temperature: 0.3,
-          max_tokens: 1000
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content;
-        if (text) return text;
-      }
-    } catch (err) {
-      console.error('[Assistant] OpenAI Call Failed:', err.message);
-    }
+  progress('Designing the application');
+  const app = await generateNewApp({ prompt: userContent, history });
+  const diff = describeChanges(app.files.map((f) => ({ path: f.path, action: 'create', before: '', after: f.content })));
+  const extra = app.envVars.filter((v) => !v.generate);
+  const text = [
+    `I wrote **${app.name}**${app.description ? `: ${app.description}` : '.'}`,
+    app.notes,
+    `Applying this creates a private GitHub repository with ${app.files.length} files and deploys it as a new service.`
+      + (app.envVars.some((v) => v.generate) ? ` Secrets such as ${app.envVars.filter((v) => v.generate).map((v) => `\`${v.key}\``).join(', ')} are generated for you.` : ''),
+    extra.length ? `You will need to set: ${extra.map((v) => `\`${v.key}\`${v.description ? ` (${v.description})` : ''}`).join(', ')}.` : ''
+  ].filter(Boolean).join('\n\n');
+
+  return {
+    text,
+    actions: [{
+      type: 'create_app',
+      title: `Create ${app.name}`,
+      description: app.description,
+      risk: 'medium',
+      reversible: true,
+      targets: [{ type: 'environment', id: environmentId }],
+      payload: { name: app.name, description: app.description, port: app.port, envVars: app.envVars, files: app.files, environmentId, projectId: thread.project_id },
+      diff
+    }]
+  };
+}
+
+async function proposeCodeChange({ thread, team, route, userContent, history, progress }) {
+  const services = projectServices(thread.project_id);
+  const service = services.find((s) => s.id === route.serviceId);
+  if (!service) {
+    const options = services.filter((s) => s.source_type === 'github' && s.source_repo).map((s) => s.name);
+    return { text: options.length ? `Which service should I change? It needs to deploy from GitHub: ${options.join(', ')}.` : 'I can only change code for services that deploy from a GitHub repository, and this project has none yet.' };
+  }
+  if (service.source_type !== 'github' || !service.source_repo) {
+    return { text: `**${service.name}** doesn't deploy from a GitHub repository, so there is no source code I can edit. I can still build a new app for you, or help configure it.` };
+  }
+  if (!githubConnected(team.team_id)) {
+    return { text: 'Connect GitHub first (Settings, Integrations) so I can read and write this repository.' };
   }
 
-  if (GEMINI_API_KEY) {
-    try {
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${GEMINI_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: 'gemini-1.5-flash',
-          messages,
-          temperature: 0.3
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content;
-        if (text) return text;
-      }
-    } catch (err) {
-      console.error('[Assistant] Gemini Call Failed:', err.message);
-    }
+  const repo = service.source_repo;
+  progress(`Reading ${repo}`);
+  const settings = queryOne('SELECT branch FROM service_settings WHERE service_id = ?', service.id);
+  const { branch, baseSha, tree, readFile } = await withGithub(team.team_id, repo, async (t) => {
+    const branch = settings?.branch || service.source_branch || (await getRepo(t, repo)).default_branch;
+    const baseSha = await getBranchHead(t, repo, branch);
+    const tree = await listFiles(t, repo, baseSha);
+    return { branch, baseSha, tree, readFile: (entry) => getBlobText(t, repo, entry.sha) };
+  });
+
+  progress('Writing the change');
+  const out = await generateChange({ prompt: userContent, repo, tree, readFile, history });
+  if (!out.changes.length) return { text: out.summary || 'I could not find a change to make for that. Tell me more about what you want.' };
+
+  const message = firstSentence(out.summary) || 'Update from the Morline assistant';
+  return {
+    text: `${out.summary}\n\nReview the diff below. Applying it commits to \`${branch}\` of \`${repo}\` and redeploys **${service.name}**, or you can open a pull request instead.`,
+    actions: [{
+      type: 'modify_code',
+      title: message,
+      description: `${out.changes.length} file${out.changes.length === 1 ? '' : 's'} in ${repo}`,
+      risk: 'medium',
+      reversible: true,
+      targets: [{ type: 'service', id: service.id, label: service.name }],
+      payload: { serviceId: service.id, repo, branch, baseSha, mode: 'commit', message, summary: out.summary, changes: out.changes },
+      diff: describeChanges(out.changes)
+    }]
+  };
+}
+
+async function respond({ thread, user, userContent, context, history, progress }) {
+  if (!llmConfigured()) return { text: await answerQuestion(thread, userContent, history) };
+
+  const team = queryOne('SELECT team_id FROM projects WHERE id = ?', thread.project_id);
+  const services = projectServices(thread.project_id);
+  const preferred = (Array.isArray(context) ? context : []).find((c) => c?.type === 'service')?.id || null;
+
+  let route = { intent: 'answer', serviceId: preferred };
+  try {
+    route = await classifyIntent({ message: userContent, services, history, preferredServiceId: preferred });
+  } catch (err) {
+    console.error('[Assistant] intent routing failed:', err.message);
   }
 
-  if (ANTHROPIC_API_KEY) {
-    try {
-      const anthropicMsgs = messages.filter(m => m.role !== 'system');
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-3-5-sonnet-20241022',
-          system: systemPrompt,
-          messages: anthropicMsgs,
-          max_tokens: 1000
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const text = data.content?.[0]?.text;
-        if (text) return text;
-      }
-    } catch (err) {
-      console.error('[Assistant] Anthropic Call Failed:', err.message);
-    }
+  try {
+    if (team && route.intent === 'build_app') return await proposeNewApp({ thread, team, userContent, history, progress });
+    if (team && route.intent === 'change_code') return await proposeCodeChange({ thread, team, route, userContent, history, progress });
+  } catch (err) {
+    console.error('[Assistant] build failed:', err.message);
+    return { text: `I couldn't put that together: ${err.message.replace(/\.$/, '')}.\n\nTry rephrasing, or break the request into smaller steps.` };
   }
-
-  // Fallback when no LLM API key is configured
-  if (crashedServices.length > 0) {
-    const s = crashedServices[0];
-    const lastErr = recentErrors.find(e => e.service_name === s.name);
-    return `### ⚠️ Live Environment Diagnostic\n\nService **${s.name}** is currently **CRASHED**.\n\n` +
-      (lastErr ? `**Latest Error**: \`${lastErr.error_summary}\`\n\n` : '') +
-      `*Note: To enable full AI reasoning, code generation, and interactive chat, please configure \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your server environment variables.*`;
-  }
-
-  return `Morline AI Assistant is ready. To enable live LLM intelligence, please set \`OPENAI_API_KEY\` or \`GEMINI_API_KEY\` in your environment variables. All your services are currently running.`;
+  progress('Thinking');
+  return { text: await answerQuestion(thread, userContent, history) };
 }
 
 // POST /assistant/threads/:threadId/messages
@@ -456,9 +472,9 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     // Auto-create thread if client provided a random ID
     if (!thread) {
       const defaultProj = queryOne(`
-        SELECT p.id, e.id as env_id 
-        FROM projects p 
-        LEFT JOIN environments e ON e.project_id = p.id 
+        SELECT p.id, e.id as env_id
+        FROM projects p
+        LEFT JOIN environments e ON e.project_id = p.id
         WHERE p.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?)
         ORDER BY p.created_at ASC LIMIT 1
       `, req.user.id);
@@ -469,66 +485,65 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
         VALUES (?, ?, ?, ?, 0, ?, ?, ?)
       `, threadId, defaultProj?.id || null, defaultProj?.env_id || null, title, req.user.id, now, now);
       thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
+    } else if (thread.created_by && thread.created_by !== req.user.id) {
+      throw forbidden('This conversation belongs to someone else');
     }
 
     const { context = [] } = req.body || {};
     const userMsgId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const assistantMsgId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
-    const userAuthor = JSON.stringify(mapUserRef(req.user));
-    const userContext = JSON.stringify(context);
+    // Conversation so far, taken before this message is stored so it isn't sent twice.
+    const history = queryAll(`
+      SELECT role, content FROM assistant_messages
+      WHERE thread_id = ? AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT 10
+    `, threadId).reverse().map((m) => ({ role: m.role, content: m.content }));
 
-    // Save user message
     execute(`
       INSERT INTO assistant_messages (id, thread_id, role, status, content, context, author, created_at)
       VALUES (?, ?, 'user', 'done', ?, ?, ?, ?)
-    `, userMsgId, threadId, userContent, userContext, userAuthor, now);
-
+    `, userMsgId, threadId, userContent, JSON.stringify(context), JSON.stringify(mapUserRef(req.user)), now);
     execute('UPDATE assistant_threads SET last_activity_at = ? WHERE id = ?', now, threadId);
+    const userMessageMapped = mapMessage(queryOne('SELECT * FROM assistant_messages WHERE id = ?', userMsgId));
 
-    const userMsgRow = queryOne('SELECT * FROM assistant_messages WHERE id = ?', userMsgId);
-    const userMessageMapped = mapMessage(userMsgRow);
-
-    // Generate real AI response using live platform telemetry
-    const replyText = await generateAIResponse(thread, userContent, context);
-
-    const assistantNow = new Date(Date.now() + 500).toISOString();
-    execute(`
-      INSERT INTO assistant_messages (id, thread_id, role, status, content, created_at)
-      VALUES (?, ?, 'assistant', 'done', ?, ?)
-    `, assistantMsgId, threadId, replyText, assistantNow);
-
-    const assistantMsgRow = queryOne('SELECT * FROM assistant_messages WHERE id = ?', assistantMsgId);
-    const assistantMessageMapped = mapMessage(assistantMsgRow);
-
-    const isSse = req.headers.accept && req.headers.accept.includes('text/event-stream');
+    const isSse = Boolean(req.headers.accept && req.headers.accept.includes('text/event-stream'));
+    const send = (event, data) => { if (isSse) { res.write(`event: ${event}\n`); res.write(`data: ${JSON.stringify(data)}\n\n`); } };
     if (isSse) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       res.flushHeaders?.();
+      send('message.created', { userMessage: userMessageMapped, assistantMessageId: assistantMsgId });
+    }
 
-      res.write('event: message.created\n');
-      res.write(`data: ${JSON.stringify({ userMessage: userMessageMapped, assistantMessageId: assistantMsgId })}\n\n`);
+    let outcome;
+    try {
+      outcome = await respond({ thread, user: req.user, userContent, context, history, progress: (text) => send('status', { text }) });
+    } catch (err) {
+      console.error('[Assistant]', err);
+      outcome = { text: 'Something went wrong while preparing that reply. Try again.' };
+    }
 
-      res.write('event: delta\n');
-      res.write(`data: ${JSON.stringify({ text: replyText })}\n\n`);
+    const replyText = outcome.text;
+    execute(`
+      INSERT INTO assistant_messages (id, thread_id, role, status, content, created_at)
+      VALUES (?, ?, 'assistant', 'done', ?, ?)
+    `, assistantMsgId, threadId, replyText, new Date(Date.now() + 500).toISOString());
+    for (const spec of outcome.actions || []) createAction({ messageId: assistantMsgId, threadId, ...spec });
+    const assistantMessageMapped = mapMessageFull(queryOne('SELECT * FROM assistant_messages WHERE id = ?', assistantMsgId));
 
-      res.write('event: done\n');
-      res.write(`data: ${JSON.stringify({ message: assistantMessageMapped, text: replyText })}\n\n`);
+    if (isSse) {
+      send('delta', { text: replyText });
+      send('done', { message: assistantMessageMapped, text: replyText });
       return res.end();
     }
 
     const allMsgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', threadId);
     const updatedThread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
-
+    const legacy = allMsgs.map((m) => ({ role: m.role === 'assistant' ? 'agent' : m.role, text: m.content }));
     return res.status(200).json({
-      thread: {
-        id: threadId,
-        title: updatedThread?.title || 'New conversation',
-        messages: allMsgs.map(m => ({ role: m.role === 'assistant' ? 'agent' : m.role, text: m.content }))
-      },
-      messages: allMsgs.map(m => ({ role: m.role === 'assistant' ? 'agent' : m.role, text: m.content })),
+      thread: { id: threadId, title: updatedThread?.title || 'New conversation', messages: legacy },
+      messages: legacy,
       reply: { role: 'agent', text: replyText },
       message: { role: 'agent', text: replyText },
       text: replyText,
@@ -537,6 +552,10 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
       assistantMessageId: assistantMsgId
     });
   } catch (err) {
+    if (res.headersSent) {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
+      return res.end();
+    }
     next(err);
   }
 });
@@ -545,7 +564,7 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
 router.get('/assistant/messages/:messageId', (req, res) => {
   const msg = queryOne('SELECT * FROM assistant_messages WHERE id = ?', req.params.messageId);
   if (!msg) throw notFound('Message not found');
-  return res.json(mapMessage(msg));
+  return res.json(mapMessageFull(msg));
 });
 
 // POST /assistant/messages/:messageId/stop
@@ -554,7 +573,7 @@ router.post('/assistant/messages/:messageId/stop', (req, res) => {
   if (!msg) throw notFound('Message not found');
   execute("UPDATE assistant_messages SET status = 'done' WHERE id = ?", msg.id);
   const updated = queryOne('SELECT * FROM assistant_messages WHERE id = ?', msg.id);
-  return res.json(mapMessage(updated));
+  return res.json(mapMessageFull(updated));
 });
 
 // POST /assistant/messages/:messageId/regenerate
@@ -577,58 +596,53 @@ router.put('/assistant/messages/:messageId/feedback', (req, res) => {
   return res.status(204).end();
 });
 
+// --- Actions -----------------------------------------------------------------------------------
+
+function loadAction(id) {
+  const action = queryOne('SELECT * FROM assistant_actions WHERE id = ?', id);
+  if (!action) throw notFound('Action not found');
+  return action;
+}
+
 // GET /assistant/actions/:actionId
 router.get('/assistant/actions/:actionId', (req, res) => {
-  const action = queryOne('SELECT * FROM assistant_actions WHERE id = ?', req.params.actionId);
-  if (!action) throw notFound('Action not found');
-  return res.json(mapAction(action));
+  return res.json(publicAction(loadAction(req.params.actionId)));
 });
 
-// POST /assistant/actions/:actionId/apply
-router.post('/assistant/actions/:actionId/apply', (req, res) => {
-  const action = queryOne('SELECT * FROM assistant_actions WHERE id = ?', req.params.actionId);
-  if (!action) throw notFound('Action not found');
-
-  if (action.status !== 'pending') {
-    return res.status(409).json({
-      code: 'action_stale',
-      message: 'Action is no longer pending'
-    });
+// POST /assistant/actions/:actionId/apply   body: { mode?: 'commit' | 'pr' }
+router.post('/assistant/actions/:actionId/apply', async (req, res, next) => {
+  try {
+    const action = loadAction(req.params.actionId);
+    const mode = req.body?.mode;
+    if (action.type === 'modify_code' && (mode === 'commit' || mode === 'pr') && action.status === 'pending') {
+      const payload = JSON.parse(action.payload || '{}');
+      payload.mode = mode;
+      execute('UPDATE assistant_actions SET payload = ? WHERE id = ?', JSON.stringify(payload), action.id);
+    }
+    const updated = await applyAction(loadAction(action.id), req.user);
+    return res.json(publicAction(updated));
+  } catch (err) {
+    next(err);
   }
-
-  const now = new Date().toISOString();
-  const appliedBy = JSON.stringify(mapUserRef(req.user));
-  execute("UPDATE assistant_actions SET status = 'applied', applied_at = ?, applied_by = ? WHERE id = ?", now, appliedBy, action.id);
-
-  const updated = queryOne('SELECT * FROM assistant_actions WHERE id = ?', action.id);
-  return res.json(mapAction(updated));
 });
 
 // POST /assistant/actions/:actionId/dismiss
-router.post('/assistant/actions/:actionId/dismiss', (req, res) => {
-  const action = queryOne('SELECT * FROM assistant_actions WHERE id = ?', req.params.actionId);
-  if (!action) throw notFound('Action not found');
-
-  execute("UPDATE assistant_actions SET status = 'dismissed' WHERE id = ?", action.id);
-  const updated = queryOne('SELECT * FROM assistant_actions WHERE id = ?', action.id);
-  return res.json(mapAction(updated));
+router.post('/assistant/actions/:actionId/dismiss', (req, res, next) => {
+  try {
+    return res.json(publicAction(dismissAction(loadAction(req.params.actionId), req.user)));
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /assistant/actions/:actionId/revert
-router.post('/assistant/actions/:actionId/revert', (req, res) => {
-  const action = queryOne('SELECT * FROM assistant_actions WHERE id = ?', req.params.actionId);
-  if (!action) throw notFound('Action not found');
-
-  if (!action.reversible) {
-    return res.status(409).json({
-      code: 'action_not_reversible',
-      message: 'This action cannot be reverted'
-    });
+router.post('/assistant/actions/:actionId/revert', async (req, res, next) => {
+  try {
+    const updated = await revertAction(loadAction(req.params.actionId), req.user);
+    return res.json(publicAction(updated));
+  } catch (err) {
+    next(err);
   }
-
-  execute("UPDATE assistant_actions SET status = 'reverted' WHERE id = ?", action.id);
-  const updated = queryOne('SELECT * FROM assistant_actions WHERE id = ?', action.id);
-  return res.json(mapAction(updated));
 });
 
 export default router;

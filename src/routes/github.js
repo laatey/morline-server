@@ -205,6 +205,9 @@ router.post('/webhook', async (req, res) => {
   `, repoName, repository.name, branch, branch, branch);
 
   for (const srv of matchingServices) {
+    // The assistant starts its own deployment when it commits; GitHub then echoes the push.
+    const sha = head_commit?.id;
+    if (sha && queryOne('SELECT 1 AS x FROM deployments WHERE service_id = ? AND commit_sha = ? AND state != \'failed\'', srv.id, sha)) continue;
     const deploymentId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
 

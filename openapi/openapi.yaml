@@ -237,6 +237,28 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── USERS ─────────────────────────────
+  /infrastructure/capacity:
+    get:
+      tags: [Services]
+      summary: Remaining host capacity
+      description: |
+        CPU and memory still available to hand out, after the OS/Morline reserve and every
+        running service's allocation. With `serviceId`, that service's own allocation is offered
+        back to it, so `service.maxCpus` / `service.maxMemoryMb` are the slider maximums.
+      parameters:
+        - { name: serviceId, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: Capacity report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cpu: { type: object, additionalProperties: true }
+                  memory: { type: object, additionalProperties: true }
+                  defaults: { type: object, additionalProperties: true }
+                  service: { type: object, additionalProperties: true }
   /me:
     get:
       tags: [Users]
@@ -1909,16 +1931,17 @@ paths:
       tags: [Assistant]
       summary: Approve and apply an AI-proposed change
       description: |
-        Applies the change to the project (e.g. set variables, add service, connect services,
-        redeploy, rollback). Resulting resources are returned so the canvas can update, and the
-        same changes are broadcast on the environment event stream.
+        Runs the proposed change. `create_app` creates a private GitHub repository, commits the
+        generated files, creates the service and deploys it. `modify_code` commits the diff to the
+        service's branch (or opens a pull request) and redeploys. Failed actions can be applied
+        again and resume where they stopped. Only owners, admins and members may apply.
       requestBody:
         content:
           application/json:
             schema:
               type: object
               properties:
-                edits: { type: object, additionalProperties: true, description: Optional user edits to the proposed payload }
+                mode: { type: string, enum: [commit, pr], description: "modify_code only: commit to the branch and deploy, or open a pull request" }
       responses:
         "200": { description: Applied (or partially applied — see `result.steps`), content: { application/json: { schema: { $ref: "#/components/schemas/Action" } } } }
         "409": { description: Already applied/dismissed or project changed since proposal (`code=action_stale`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
@@ -2417,6 +2440,8 @@ components:
         rootDirectory: { type: string }
         basePath: { type: [string, "null"] }
         autoDeploy: { type: boolean, description: Deploy on every push }
+        cpuLimit: { type: [number, "null"], minimum: 0.1, description: "vCPU for the container. null restores the platform default. Must fit in what the host has left (see GET /infrastructure/capacity)." }
+        memoryLimitMb: { type: [integer, "null"], minimum: 128, description: "Memory in MB. null restores the platform default. Must fit in what the host has left." }
         buildCommand: { type: [string, "null"] }
         startCommand: { type: [string, "null"] }
         dockerfilePath: { type: [string, "null"] }

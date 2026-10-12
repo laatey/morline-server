@@ -13,6 +13,7 @@ import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { rateLimit } from './middleware/rate-limit.js';
+import infrastructureRouter from './routes/infrastructure.js';
 import { enforceTenancy } from './middleware/tenancy.js';
 import { verifyOAuthState } from './services/oauth-state.js';
 import { securityHeaders } from './middleware/security-headers.js';
@@ -238,6 +239,7 @@ v1.use('/', activityRouter);
 v1.use('/search', searchRouter);
 v1.use('/', assistantRouter);
 v1.use('/integrations/github', githubRouter);
+v1.use('/infrastructure', infrastructureRouter);
 
 app.use('/v1', v1);
 

@@ -7,12 +7,17 @@ const num = (v, fallback) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
+/** Limits applied to a service that has none of its own. */
+export function defaultLimits(env = process.env) {
+  return { memoryMb: num(env.MORLINE_DEFAULT_MEMORY_MB, 1024), cpus: num(env.MORLINE_DEFAULT_CPUS, 1) };
+}
+
 export function hardeningArgs(settings = {}, env = process.env) {
   const args = [];
   const harden = env.MORLINE_HARDEN !== '0';
 
-  const memory = settings.memory_limit_mb || (harden ? num(env.MORLINE_DEFAULT_MEMORY_MB, 2048) : null);
-  const cpus = settings.cpu_limit || (harden ? num(env.MORLINE_DEFAULT_CPUS, 2) : null);
+  const memory = settings.memory_limit_mb || (harden ? defaultLimits(env).memoryMb : null);
+  const cpus = settings.cpu_limit || (harden ? defaultLimits(env).cpus : null);
   if (memory) args.push('--memory', `${memory}m`);
   if (cpus) args.push('--cpus', String(cpus));
 

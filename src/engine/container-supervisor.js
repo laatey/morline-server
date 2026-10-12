@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { udpPublishSpecs, udpEnv } from './public-udp.js';
 import { hardeningArgs } from './container-hardening.js';
+import { effectiveLimits } from './capacity.js';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -253,6 +254,16 @@ export class ContainerSupervisor {
     } catch (err) {
       this.log(service, info, 'warn', `[Network] Private networking is unavailable: ${err.message}`);
     }
+  }
+
+  /** Apply a service's current CPU/memory limits to its running container (`docker update`). */
+  async applyResourceLimits(serviceId) {
+    const info = this.processes.get(serviceId);
+    if (!info?.name || info.kind === 'compose') return;
+    const settings = queryOne('SELECT cpu_limit, memory_limit_mb FROM service_settings WHERE service_id = ?', serviceId) || {};
+    const { cpus, memoryMb } = effectiveLimits(settings);
+    // Memory and swap are set together so the new ceiling is a real one.
+    await run('docker', ['update', '--memory', `${memoryMb}m`, '--memory-swap', `${memoryMb}m`, '--cpus', String(cpus), info.name]);
   }
 
   async refreshPrivateAlias(serviceId) {
