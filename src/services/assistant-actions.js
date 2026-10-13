@@ -4,7 +4,7 @@ import { execute, queryOne } from '../db/index.js';
 import { mapAction } from '../db/mappers.js';
 import { AppError, forbidden, notFound } from '../middleware/error-handler.js';
 import { GitHubError, withGithub, createRepoForTeam, getRepo, getBranchHead, commitFiles, createBranch, createPullRequest } from './github-repo.js';
-import { createRepoService, startDeployment } from './service-factory.js';
+import { createRepoService, startDeployment, writeWorkspaceFiles } from './service-factory.js';
 import { slugify } from './builder/files.js';
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
@@ -28,9 +28,14 @@ export function publicAction(row) {
   const p = action.payload || {};
   action.payload = {
     repo: p.repo, branch: p.branch, mode: p.mode, serviceId: p.serviceId, name: p.name, port: p.port,
-    envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length
+    envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length,
+    deploy: p.deploy, githubConnected: row.type === 'create_app' ? githubConnected(teamOf(row)?.team_id) : undefined
   };
   return action;
+}
+
+export function githubConnected(teamId) {
+  return Boolean(queryOne('SELECT 1 AS ok FROM github_integration WHERE team_id = ? AND connected = 1', teamId));
 }
 
 function teamOf(row) {
@@ -72,55 +77,81 @@ async function runCreateApp(row, user, team) {
   const result = parse(row.result, {}) || {};
   const save = () => update(row.id, { result: json(result) });
 
-  if (!result.repo) {
-    const base = slugify(payload.name);
-    let created;
-    for (let i = 1; i <= 6 && !created; i++) {
-      try {
-        created = await createRepoForTeam(team.team_id, { name: i === 1 ? base : `${base}-${i}`, description: payload.description, isPrivate: true });
-      } catch (err) {
-        if (!(err instanceof GitHubError) || err.status !== 422 || i === 6) throw err;
-      }
-    }
-    result.repo = { fullName: created.full_name, url: created.html_url, branch: created.default_branch || 'main' };
-    save();
-  }
-
-  if (!result.commitSha) {
-    const { fullName, branch } = result.repo;
-    // A fresh repository can take a moment before its first ref is readable.
-    let head;
-    for (let i = 0; i < 5 && !head; i++) {
-      try { head = await withGithub(team.team_id, fullName, (t) => getBranchHead(t, fullName, branch)); }
-      catch (err) { if (i === 4) throw err; await new Promise((r) => setTimeout(r, 800 * (i + 1))); }
-    }
-    const commit = await withGithub(team.team_id, fullName, (t) => commitFiles(t, fullName, {
-      branch, baseSha: head, message: `Initial version: ${payload.name}\n\nGenerated with Morline`,
-      changes: payload.files.map((f) => ({ path: f.path, action: 'create', content: f.content }))
-    }));
-    result.commitSha = commit.sha;
-    result.commitUrl = commit.url;
-    save();
-  }
-
-  if (!result.serviceId) {
+  const direct = payload.deploy === 'direct';
+  const variablesFor = () => {
     const variables = (payload.envVars || [])
       .filter((v) => v.generate)
       .map((v) => ({ key: v.key, value: crypto.randomBytes(24).toString('hex'), secret: true }));
     if (payload.volume) variables.push({ key: 'DATA_DIR', value: payload.volume.mountPath, secret: false });
-    const service = createRepoService({
-      environmentId: payload.environmentId, name: slugify(payload.name), repo: result.repo.fullName,
-      branch: result.repo.branch, port: payload.port, variables, volume: payload.volume
-    });
-    result.serviceId = service.id;
-    result.generatedVariables = variables.map((v) => v.key);
-    save();
+    return variables;
+  };
+
+  if (direct) {
+    // No GitHub: the files go straight into the service's build workspace.
+    if (!result.serviceId) {
+      const variables = variablesFor();
+      const service = createRepoService({
+        environmentId: payload.environmentId, name: slugify(payload.name), repo: null,
+        branch: null, port: payload.port, variables, volume: payload.volume
+      });
+      result.serviceId = service.id;
+      result.generatedVariables = variables.map((v) => v.key);
+      save();
+    }
+    if (!result.filesWritten) {
+      writeWorkspaceFiles(result.serviceId, payload.files);
+      result.filesWritten = true;
+      save();
+    }
+  } else {
+    if (!githubConnected(team.team_id)) throw new GitHubError('GitHub is not connected for this team. Connect it, or choose to deploy without GitHub.', 400);
+    if (!result.repo) {
+      const base = slugify(payload.name);
+      let created;
+      for (let i = 1; i <= 6 && !created; i++) {
+        try {
+          created = await createRepoForTeam(team.team_id, { name: i === 1 ? base : `${base}-${i}`, description: payload.description, isPrivate: true });
+        } catch (err) {
+          if (!(err instanceof GitHubError) || err.status !== 422 || i === 6) throw err;
+        }
+      }
+      result.repo = { fullName: created.full_name, url: created.html_url, branch: created.default_branch || 'main' };
+      save();
+    }
+
+    if (!result.commitSha) {
+      const { fullName, branch } = result.repo;
+      // A fresh repository can take a moment before its first ref is readable.
+      let head;
+      for (let i = 0; i < 5 && !head; i++) {
+        try { head = await withGithub(team.team_id, fullName, (t) => getBranchHead(t, fullName, branch)); }
+        catch (err) { if (i === 4) throw err; await new Promise((r) => setTimeout(r, 800 * (i + 1))); }
+      }
+      const commit = await withGithub(team.team_id, fullName, (t) => commitFiles(t, fullName, {
+        branch, baseSha: head, message: `Initial version: ${payload.name}\n\nGenerated with Morline`,
+        changes: payload.files.map((f) => ({ path: f.path, action: 'create', content: f.content }))
+      }));
+      result.commitSha = commit.sha;
+      result.commitUrl = commit.url;
+      save();
+    }
+
+    if (!result.serviceId) {
+      const variables = variablesFor();
+      const service = createRepoService({
+        environmentId: payload.environmentId, name: slugify(payload.name), repo: result.repo.fullName,
+        branch: result.repo.branch, port: payload.port, variables, volume: payload.volume
+      });
+      result.serviceId = service.id;
+      result.generatedVariables = variables.map((v) => v.key);
+      save();
+    }
   }
 
   if (!result.deploymentId) {
     result.deploymentId = startDeployment({
-      serviceId: result.serviceId, userId: user.id, commitSha: result.commitSha,
-      message: `Initial version: ${payload.name}`, branch: result.repo.branch
+      serviceId: result.serviceId, userId: user.id, commitSha: result.commitSha || null,
+      message: `Initial version: ${payload.name}`, branch: result.repo?.branch || null
     });
     save();
   }

@@ -38,6 +38,24 @@ function renderPopupSuccess(res) {
 </html>`);
 }
 
+function renderPopupError(res, message) {
+  const safe = String(message || 'Something went wrong').replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c]));
+  return res.status(400).send(`<!DOCTYPE html>
+<html>
+<head><title>GitHub</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #090a0f; color: #fff;">
+  <div style="text-align: center; max-width: 320px; padding: 0 16px;">
+    <h3 style="margin: 0 0 8px 0; font-size: 16px;">Could not connect GitHub</h3>
+    <p style="margin: 0; color: #aaa; font-size: 13px;">${safe}</p>
+    <p style="margin: 12px 0 0 0; color: #888; font-size: 12px;">You can close this window and try again.</p>
+  </div>
+  <script>
+    if (window.opener) { try { window.opener.postMessage({ type: 'github_error', message: ${JSON.stringify(String(message || ''))} }, '*'); } catch (e) {} }
+  </script>
+</body>
+</html>`);
+}
+
 // Callback (public endpoint, called by GitHub redirect for OAuth or App Installation)
 router.get('/callback', async (req, res, next) => {
   try {
@@ -45,7 +63,7 @@ router.get('/callback', async (req, res, next) => {
     const teamId = verifyOAuthState(state); // null unless Morline signed this state
 
     if (error) {
-      return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(error)}`);
+      return renderPopupError(res, req.query.error_description || error);
     }
 
     // Case 1: GitHub App Installation callback
@@ -73,7 +91,7 @@ router.get('/callback', async (req, res, next) => {
 
       const targetTeamId = teamId;
       if (!targetTeamId) {
-        return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent('Missing teamId in GitHub installation callback state')}`);
+        return renderPopupError(res, 'Missing teamId in GitHub installation callback state');
       }
       const now = new Date().toISOString();
 
@@ -117,7 +135,7 @@ router.get('/callback', async (req, res, next) => {
 
       const tokenData = await tokenRes.json();
       if (tokenData.error) {
-        return res.redirect(`${FRONTEND_URL}/settings/integrations?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`);
+        return renderPopupError(res, tokenData.error_description || tokenData.error);
       }
 
       const accessToken = tokenData.access_token;
@@ -412,7 +430,7 @@ router.get('/repos/:owner/:repo/branches', async (req, res, next) => {
 router.get('/repos/:owner/:repo/detect', async (req, res) => {
   const { owner, repo } = req.params;
   const { teamId } = req.query;
-  const token = getTeamToken(teamId);
+  const token = await getTeamToken(teamId);
 
   let logo = 'js';
   let framework = 'Node.js';

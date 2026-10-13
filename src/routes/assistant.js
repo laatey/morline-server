@@ -9,7 +9,7 @@ import { complete, llmConfigured } from '../services/llm.js';
 import { classifyIntent, generateNewApp, generateChange } from '../services/builder/generate.js';
 import { describeChanges } from '../services/builder/diff.js';
 import { GitHubError, withGithub, getRepo, getBranchHead, listFiles, getBlobText } from '../services/github-repo.js';
-import { createAction, publicAction, applyAction, revertAction, dismissAction } from '../services/assistant-actions.js';
+import { createAction, publicAction, applyAction, revertAction, dismissAction, githubConnected } from '../services/assistant-actions.js';
 
 const router = Router();
 
@@ -20,6 +20,24 @@ function mapMessageFull(row) {
   m.actions = queryAll('SELECT * FROM assistant_actions WHERE message_id = ? ORDER BY created_at ASC', row.id).map(publicAction);
   return m;
 }
+/** Is this user on the team that owns the project? Conversations never cross project lines. */
+function isProjectMember(user, projectId) {
+  if (!projectId) return false;
+  return Boolean(queryOne(`
+    SELECT 1 AS ok FROM projects p
+    JOIN team_members m ON m.team_id = p.team_id
+    WHERE p.id = ? AND m.user_id = ?
+  `, projectId, user.id));
+}
+
+/** Load a thread the user may see: it must belong to a project they are a member of. */
+function loadThreadFor(user, threadId) {
+  const thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
+  if (!thread) throw notFound('Thread not found');
+  if (!isProjectMember(user, thread.project_id) && thread.created_by !== user.id) throw forbidden('This conversation belongs to another project');
+  return thread;
+}
+
 router.use('/projects/:projectId/assistant', requireAuth);
 router.use('/assistant', requireAuth);
 
@@ -95,23 +113,17 @@ function queryThreads(whereClause, params) {
   });
 }
 
-// GET /assistant/threads (Global, user-scoped, or project/environment scoped)
+// GET /assistant/threads?projectId=...  Conversations are per project, so a project is required.
 router.get('/assistant/threads', (req, res) => {
   const { projectId, environmentId } = req.query;
-  const conditions = ['(t.created_by = ? OR t.created_by IS NULL)'];
-  const params = [req.user.id];
-
-  if (projectId) {
-    conditions.push('t.project_id = ?');
-    params.push(projectId);
-  }
+  if (!projectId || !isProjectMember(req.user, projectId)) return res.json({ data: [] });
+  const conditions = ['t.project_id = ?'];
+  const params = [projectId];
   if (environmentId) {
     conditions.push('t.environment_id = ?');
     params.push(environmentId);
   }
-
-  const data = queryThreads(conditions.join(' AND '), params);
-  return res.json({ data });
+  return res.json({ data: queryThreads(conditions.join(' AND '), params) });
 });
 
 // POST /assistant/threads (Direct creation with optional projectId / environmentId)
@@ -123,6 +135,7 @@ router.post('/assistant/threads', (req, res, next) => {
     const threadId = id || `thd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const now = new Date().toISOString();
 
+    if (projectId && !isProjectMember(req.user, projectId)) throw forbidden('You are not a member of this project');
     // Auto-resolve project/environment if not provided
     if (!projectId) {
       const defaultProj = queryOne(`
@@ -160,6 +173,7 @@ router.post('/assistant/threads', (req, res, next) => {
 // GET /projects/:projectId/assistant/threads
 router.get('/projects/:projectId/assistant/threads', (req, res) => {
   const { projectId } = req.params;
+  if (!isProjectMember(req.user, projectId)) return res.json({ data: [] });
   const data = queryThreads('t.project_id = ?', [projectId]);
   return res.json({ data });
 });
@@ -168,6 +182,7 @@ router.get('/projects/:projectId/assistant/threads', (req, res) => {
 router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
   try {
     const { projectId } = req.params;
+    if (!isProjectMember(req.user, projectId)) throw forbidden('You are not a member of this project');
     let { id, environmentId, title = 'New Conversation' } = req.body || {};
     const existingThread = id ? queryOne('SELECT created_by FROM assistant_threads WHERE id = ?', id) : null;
     if (existingThread?.created_by && existingThread.created_by !== req.user.id) throw forbidden('This conversation belongs to someone else');
@@ -204,13 +219,13 @@ router.post('/projects/:projectId/assistant/threads', (req, res, next) => {
 // GET /assistant/threads/:threadId
 router.get('/assistant/threads/:threadId', (req, res) => {
   const threadId = req.params.threadId;
+  loadThreadFor(req.user, threadId);
   const row = queryOne(`
     SELECT t.*, e.name as environment_name
     FROM assistant_threads t
     LEFT JOIN environments e ON e.id = t.environment_id
     WHERE t.id = ?
   `, threadId);
-  if (!row) throw notFound('Thread not found');
 
   const user = row.created_by ? queryOne('SELECT * FROM users WHERE id = ?', row.created_by) : null;
   const counts = getThreadCounts(row.id);
@@ -221,6 +236,7 @@ router.get('/assistant/threads/:threadId', (req, res) => {
 router.patch('/assistant/threads/:threadId', (req, res, next) => {
   try {
     const threadId = req.params.threadId;
+    loadThreadFor(req.user, threadId);
     const { title, archived } = req.body || {};
 
     const updates = [];
@@ -259,6 +275,8 @@ router.patch('/assistant/threads/:threadId', (req, res, next) => {
 // DELETE /assistant/threads/:threadId
 router.delete('/assistant/threads/:threadId', (req, res) => {
   const threadId = req.params.threadId;
+  const existing = queryOne('SELECT id FROM assistant_threads WHERE id = ?', threadId);
+  if (existing) loadThreadFor(req.user, threadId);
   execute('DELETE FROM assistant_threads WHERE id = ?', threadId);
   return res.status(204).end();
 });
@@ -266,6 +284,7 @@ router.delete('/assistant/threads/:threadId', (req, res) => {
 // GET /assistant/threads/:threadId/messages
 router.get('/assistant/threads/:threadId/messages', (req, res) => {
   const threadId = req.params.threadId;
+  loadThreadFor(req.user, threadId);
   const limit = parseInt(req.query.limit || '50', 10);
   const before = req.query.before;
 
@@ -351,18 +370,10 @@ const firstSentence = (text, max = 72) => {
   return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
 };
 
-function githubConnected(teamId) {
-  return Boolean(queryOne('SELECT 1 AS ok FROM github_integration WHERE team_id = ? AND connected = 1', teamId));
-}
-
 async function proposeNewApp({ thread, team, userContent, history, progress }) {
   const environmentId = thread.environment_id
     || queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', thread.project_id)?.id;
   if (!environmentId) return { text: 'This project has no environment to deploy into yet. Create one first.' };
-  if (!githubConnected(team.team_id)) {
-    return { text: 'Connect GitHub first (Settings, Integrations). I commit the generated code to a new private repository in your account, and Morline deploys from there.' };
-  }
-
   progress('Designing the application');
   const app = await generateNewApp({ prompt: userContent, history, onStep: progress });
   const diff = describeChanges(app.files.map((f) => ({ path: f.path, action: 'create', before: '', after: f.content })));
@@ -370,7 +381,7 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
   const text = [
     `I wrote **${app.name}**${app.description ? `: ${app.description}` : '.'}`,
     app.notes,
-    `Applying this creates a private GitHub repository with ${app.files.length} files${app.volume ? `, attaches a ${app.volume.sizeGb} GB volume at \`${app.volume.mountPath}\`` : ''} and deploys it as a new service.`
+    `Applying this deploys ${app.files.length} files as a new service${app.volume ? ` with a ${app.volume.sizeGb} GB volume at \`${app.volume.mountPath}\`` : ''}. You can deploy straight away, or also save the code to a new private GitHub repository.`
       + (app.envVars.some((v) => v.generate) ? ` Secrets such as ${app.envVars.filter((v) => v.generate).map((v) => `\`${v.key}\``).join(', ')} are generated for you.` : ''),
     extra.length ? `You will need to set: ${extra.map((v) => `\`${v.key}\`${v.description ? ` (${v.description})` : ''}`).join(', ')}.` : ''
   ].filter(Boolean).join('\n\n');
@@ -458,6 +469,25 @@ async function respond({ thread, user, userContent, context, history, progress }
   return { text: await answerQuestion(thread, userContent, history) };
 }
 
+/** A 2-5 word name for a conversation. Falls back to the user's own words when no model is available. */
+async function generateThreadTitle(userContent, replyText) {
+  const fallback = firstSentence(userContent, 40) || 'New conversation';
+  if (!llmConfigured()) return fallback;
+  try {
+    const raw = await complete({
+      system: 'You name chat conversations. Reply with only a short title of 2 to 5 words that captures the topic. No quotes, no trailing punctuation, no emoji. Use sentence case.',
+      messages: [{ role: 'user', content: `User message:\n${userContent.slice(0, 600)}\n\nAssistant reply:\n${String(replyText || '').slice(0, 400)}\n\nTitle:` }],
+      maxTokens: 24,
+      temperature: 0.3
+    });
+    const title = raw.split('\n')[0].replace(/^["'`\s]+|["'`.\s]+$/g, '').slice(0, 60);
+    return title || fallback;
+  } catch (err) {
+    console.error('[Assistant] title generation failed:', err.message);
+    return fallback;
+  }
+}
+
 // POST /assistant/threads/:threadId/messages
 router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
   try {
@@ -468,24 +498,31 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     const userContent = req.body?.content || req.body?.text || req.body?.message;
     if (!userContent) throw validationError('content or text is required');
 
-    // Auto-create thread if client provided a random ID
+    const bodyProjectId = req.body?.projectId || null;
+    // Auto-create thread if client provided a random ID. It belongs to the project the user is in.
     if (!thread) {
-      const defaultProj = queryOne(`
-        SELECT p.id, e.id as env_id
-        FROM projects p
-        LEFT JOIN environments e ON e.project_id = p.id
-        WHERE p.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?)
-        ORDER BY p.created_at ASC LIMIT 1
-      `, req.user.id);
+      let projectId = bodyProjectId;
+      if (projectId && !isProjectMember(req.user, projectId)) throw forbidden('You are not a member of this project');
+      if (!projectId) {
+        projectId = queryOne(`
+          SELECT p.id FROM projects p
+          WHERE p.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?)
+          ORDER BY p.created_at ASC LIMIT 1
+        `, req.user.id)?.id || null;
+      }
+      const environmentId = (req.body?.environmentId
+        && queryOne('SELECT id FROM environments WHERE id = ? AND project_id = ?', req.body.environmentId, projectId)?.id)
+        || queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', projectId)?.id || null;
 
       const title = userContent.slice(0, 40) || 'New Conversation';
       execute(`
         INSERT INTO assistant_threads (id, project_id, environment_id, title, archived, created_by, created_at, last_activity_at)
         VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-      `, threadId, defaultProj?.id || null, defaultProj?.env_id || null, title, req.user.id, now, now);
+      `, threadId, projectId, environmentId, title, req.user.id, now, now);
       thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
-    } else if (thread.created_by && thread.created_by !== req.user.id) {
-      throw forbidden('This conversation belongs to someone else');
+    } else {
+      if (thread.created_by && thread.created_by !== req.user.id) throw forbidden('This conversation belongs to someone else');
+      if (bodyProjectId && thread.project_id !== bodyProjectId) throw forbidden('This conversation belongs to another project');
     }
 
     const { context = [] } = req.body || {};
@@ -515,27 +552,46 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
       send('message.created', { userMessage: userMessageMapped, assistantMessageId: assistantMsgId });
     }
 
+    const startedAt = Date.now();
+    const steps = [];
+    const isFirstMessage = history.length === 0;
     let outcome;
     try {
-      outcome = await respond({ thread, user: req.user, userContent, context, history, progress: (text) => send('status', { text }) });
+      outcome = await respond({
+        thread, user: req.user, userContent, context, history,
+        progress: (text) => { if (text && steps[steps.length - 1] !== text) steps.push(text); send('status', { text }); }
+      });
     } catch (err) {
       console.error('[Assistant]', err);
       outcome = { text: 'Something went wrong while preparing that reply. Try again.' };
     }
 
     const replyText = outcome.text;
+    // Keep the work behind the reply so "Worked for 8s" survives a refresh.
+    const toolCalls = steps.length ? JSON.stringify({ steps, durationMs: Date.now() - startedAt }) : null;
     execute(`
-      INSERT INTO assistant_messages (id, thread_id, role, status, content, created_at)
-      VALUES (?, ?, 'assistant', 'done', ?, ?)
-    `, assistantMsgId, threadId, replyText, new Date(Date.now() + 500).toISOString());
+      INSERT INTO assistant_messages (id, thread_id, role, status, content, tool_calls, created_at)
+      VALUES (?, ?, 'assistant', 'done', ?, ?, ?)
+    `, assistantMsgId, threadId, replyText, toolCalls, new Date(Date.now() + 500).toISOString());
     for (const spec of outcome.actions || []) createAction({ messageId: assistantMsgId, threadId, ...spec });
     const assistantMessageMapped = mapMessageFull(queryOne('SELECT * FROM assistant_messages WHERE id = ?', assistantMsgId));
+
+    // First message of a conversation: have the model name it.
+    const titleFor = async () => {
+      if (!isFirstMessage) return null;
+      const title = await generateThreadTitle(userContent, replyText);
+      execute('UPDATE assistant_threads SET title = ? WHERE id = ?', title, threadId);
+      return title;
+    };
 
     if (isSse) {
       send('delta', { text: replyText });
       send('done', { message: assistantMessageMapped, text: replyText });
+      const title = await titleFor().catch(() => null);
+      if (title) send('thread.title', { threadId, title });
       return res.end();
     }
+    await titleFor().catch(() => null);
 
     const allMsgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', threadId);
     const updatedThread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
@@ -616,6 +672,12 @@ router.post('/assistant/actions/:actionId/apply', async (req, res, next) => {
     if (action.type === 'modify_code' && (mode === 'commit' || mode === 'pr') && action.status === 'pending') {
       const payload = JSON.parse(action.payload || '{}');
       payload.mode = mode;
+      execute('UPDATE assistant_actions SET payload = ? WHERE id = ?', JSON.stringify(payload), action.id);
+    }
+    const deploy = req.body?.deploy;
+    if (action.type === 'create_app' && (deploy === 'github' || deploy === 'direct') && action.status !== 'applying') {
+      const payload = JSON.parse(action.payload || '{}');
+      payload.deploy = deploy;
       execute('UPDATE assistant_actions SET payload = ? WHERE id = ?', JSON.stringify(payload), action.id);
     }
     const updated = await applyAction(loadAction(action.id), req.user);

@@ -115,12 +115,20 @@ export async function withGithub(teamId, repo, fn) {
       if (!(err instanceof GitHubError) || ![401, 403, 404].includes(err.status)) throw err;
     }
   }
-  throw new GitHubError(`${last?.message || 'Access denied'}. Check that the Morline GitHub App can write to this repository.`, last?.status || 403);
+  throw new GitHubError(
+    `${last?.message || 'Access denied'}. Morline's GitHub App can't see or write to ${repo || 'this repository'}. ` +
+    'In GitHub, open Settings, Applications, Morline, Configure, and either choose "All repositories" or add this one.',
+    last?.status || 403
+  );
 }
 
 /**
  * Create a repository for the team's connected GitHub account. Personal accounts need the
  * user's own OAuth token; organisation accounts can also use the app installation token.
+ *
+ * Every attempt is recorded. The error we raise is the first real failure, not whatever the last
+ * fallback happened to say (a fallback that can never work for a personal account used to turn a
+ * useful "missing permission" into a bare "Not Found").
  */
 export async function createRepoForTeam(teamId, { name, description, isPrivate = true }) {
   const row = queryOne('SELECT account, access_token, installation_id FROM github_integration WHERE team_id = ? AND connected = 1', teamId);
@@ -129,29 +137,49 @@ export async function createRepoForTeam(teamId, { name, description, isPrivate =
 
   const attempts = [];
   if (row.access_token) {
-    attempts.push(async () => {
-      const me = await gh(row.access_token, 'GET', '/user');
-      const personal = !row.account || me.login.toLowerCase() === row.account.toLowerCase();
-      return gh(row.access_token, 'POST', personal ? '/user/repos' : `/orgs/${row.account}/repos`, payload);
+    attempts.push({
+      label: 'your GitHub login',
+      run: async () => {
+        const me = await gh(row.access_token, 'GET', '/user');
+        const personal = !row.account || me.login.toLowerCase() === row.account.toLowerCase();
+        return gh(row.access_token, 'POST', personal ? '/user/repos' : `/orgs/${row.account}/repos`, payload);
+      }
     });
   }
   if (row.installation_id && row.account) {
-    attempts.push(async () => {
-      const token = await getInstallationToken(row.installation_id);
-      if (!token) throw new GitHubError('Could not mint an installation token', 401);
-      return gh(token, 'POST', `/orgs/${row.account}/repos`, payload);
+    attempts.push({
+      label: 'the Morline app installation',
+      run: async () => {
+        const token = await getInstallationToken(row.installation_id);
+        if (!token) throw new GitHubError('Could not mint an installation token', 401);
+        // Installation tokens can only create repositories inside an organisation.
+        const owner = await gh(token, 'GET', `/users/${encodeURIComponent(row.account)}`).catch(() => null);
+        if (owner && owner.type !== 'Organization') {
+          const skip = new GitHubError('Installation tokens cannot create repositories on a personal account', 404);
+          skip.skip = true;
+          throw skip;
+        }
+        return gh(token, 'POST', `/orgs/${row.account}/repos`, payload);
+      }
     });
   }
   if (!attempts.length) throw new GitHubError('Reconnect GitHub from Settings so Morline can create repositories for you.', 400);
 
-  let last;
+  const failures = [];
   for (const attempt of attempts) {
     try {
-      return await attempt();
+      return await attempt.run();
     } catch (err) {
-      last = err;
       if (!(err instanceof GitHubError) || err.status === 422) throw err;
+      console.error(`[GitHub] Creating ${name} with ${attempt.label} failed: ${err.status} ${err.message}`);
+      if (!err.skip) failures.push({ label: attempt.label, err });
     }
   }
-  throw new GitHubError(`${last.message}. Reconnect GitHub from Settings to let Morline create repositories.`, last.status);
+  const first = failures[0]?.err;
+  throw new GitHubError(
+    `GitHub would not create the repository (${first?.status || 403} ${first?.message || 'Not Found'}). ` +
+    'This almost always means the Morline GitHub App lacks "Administration: Read and write" permission, ' +
+    'or the new permission has not been accepted yet. You can also deploy without GitHub.',
+    first?.status || 403
+  );
 }
