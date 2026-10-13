@@ -1,3 +1,4 @@
+import { destroyTeam } from '../services/service-cleanup.js';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
@@ -94,7 +95,7 @@ router.patch('/', (req, res, next) => {
 });
 
 // DELETE /me
-router.delete('/', (req, res, next) => {
+router.delete('/', async (req, res, next) => {
   try {
     const { confirm } = req.body || {};
     if (confirm !== req.user.email) {
@@ -120,6 +121,9 @@ router.delete('/', (req, res, next) => {
       }
     }
 
+    for (const team of ownedTeams) {
+      if (team.total_members <= 1) await destroyTeam(team.id);
+    }
     transaction(() => {
       // Delete user's own teams where they are the only member
       for (const team of ownedTeams) {

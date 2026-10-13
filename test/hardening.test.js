@@ -6,8 +6,8 @@ const flagValues = (args, flag) => args.flatMap((a, i) => (a === flag ? [args[i 
 
 test('applies default limits and isolation flags', () => {
   const args = hardeningArgs({}, {});
-  assert.deepEqual(flagValues(args, '--memory'), ['1024m']);
-  assert.deepEqual(flagValues(args, '--cpus'), ['1']);
+  assert.deepEqual(flagValues(args, '--memory'), ['256m']);
+  assert.deepEqual(flagValues(args, '--cpus'), ['0.2']);
   assert.deepEqual(flagValues(args, '--pids-limit'), ['1024']);
   assert.deepEqual(flagValues(args, '--security-opt'), ['no-new-privileges']);
   assert.ok(flagValues(args, '--cap-drop').includes('NET_RAW'));

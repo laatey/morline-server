@@ -1,3 +1,4 @@
+import { destroyEnvironment } from '../services/service-cleanup.js';
 import { resolveGithubSource } from '../services/github-url.js';
 import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
 import { privateHostname } from '../engine/private-network.js';
@@ -69,10 +70,15 @@ router.patch('/:environmentId', (req, res, next) => {
 });
 
 // DELETE /environments/:environmentId
-router.delete('/:environmentId', (req, res) => {
-  const env = getEnvironment(req.params.environmentId);
-  execute('DELETE FROM environments WHERE id = ?', env.id);
-  return res.status(204).end();
+router.delete('/:environmentId', async (req, res, next) => {
+  try {
+    const env = getEnvironment(req.params.environmentId);
+    await destroyEnvironment(env.id); // stops containers and removes files before the rows go
+    execute('DELETE FROM environments WHERE id = ?', env.id);
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /environments/:environmentId/status
@@ -108,7 +114,9 @@ router.get('/:environmentId/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
+  res.write('retry: 3000\n\n');
 
   const heartbeat = setInterval(() => {
     res.write(': keepalive\n\n');
@@ -119,11 +127,24 @@ router.get('/:environmentId/events', (req, res) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
+  // New log lines tell the client to refresh its log view; the lines themselves stay on the REST API.
+  let logPing = null;
+  const onLog = () => {
+    if (logPing) return;
+    logPing = setTimeout(() => {
+      logPing = null;
+      res.write('event: log\ndata: {"type":"log"}\n\n');
+    }, 400);
+  };
+
   eventBus.on(`environment:${env.id}`, onEvent);
+  eventBus.on(`environment:${env.id}:log`, onLog);
 
   req.on('close', () => {
     clearInterval(heartbeat);
+    if (logPing) clearTimeout(logPing);
     eventBus.off(`environment:${env.id}`, onEvent);
+    eventBus.off(`environment:${env.id}:log`, onLog);
   });
 });
 

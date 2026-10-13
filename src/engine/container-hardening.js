@@ -9,7 +9,7 @@ const num = (v, fallback) => {
 
 /** Limits applied to a service that has none of its own. */
 export function defaultLimits(env = process.env) {
-  return { memoryMb: num(env.MORLINE_DEFAULT_MEMORY_MB, 1024), cpus: num(env.MORLINE_DEFAULT_CPUS, 1) };
+  return { memoryMb: num(env.MORLINE_DEFAULT_MEMORY_MB, 256), cpus: num(env.MORLINE_DEFAULT_CPUS, 0.2) };
 }
 
 export function hardeningArgs(settings = {}, env = process.env) {

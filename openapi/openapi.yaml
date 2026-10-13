@@ -245,6 +245,8 @@ paths:
         CPU and memory still available to hand out, after the OS/Morline reserve and every
         running service's allocation. With `serviceId`, that service's own allocation is offered
         back to it, so `service.maxCpus` / `service.maxMemoryMb` are the slider maximums.
+        Only services that hold a container count (online, deploying, building). Restarting,
+        waking or deploying a service that no longer fits answers 409 `insufficient_capacity`.
       parameters:
         - { name: serviceId, in: query, required: false, schema: { type: string } }
       responses:

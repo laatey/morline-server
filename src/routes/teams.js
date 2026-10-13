@@ -1,3 +1,4 @@
+import { destroyTeam } from '../services/service-cleanup.js';
 import { resolveGithubSource } from '../services/github-url.js';
 import { hasTemplate, provisionTemplate } from '../templates/catalog.js';
 import { notify } from '../services/notifications.js';
@@ -157,11 +158,16 @@ router.patch('/teams/:teamId', requireAuth, (req, res, next) => {
 });
 
 // DELETE /teams/:teamId
-router.delete('/teams/:teamId', requireAuth, (req, res) => {
-  const teamId = req.params.teamId;
-  checkTeamRole(teamId, req.user.id, ['owner']);
-  execute('DELETE FROM teams WHERE id = ?', teamId);
-  return res.status(204).end();
+router.delete('/teams/:teamId', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = req.params.teamId;
+    checkTeamRole(teamId, req.user.id, ['owner']);
+    await destroyTeam(teamId); // stops containers and removes files before the rows go
+    execute('DELETE FROM teams WHERE id = ?', teamId);
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /teams/:teamId/members

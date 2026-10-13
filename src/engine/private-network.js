@@ -98,6 +98,12 @@ export async function ensureEnvNetwork(environmentId) {
   throw new Error('Could not find a free address range for the private network');
 }
 
+/** Remove an environment's Docker network and release its address range. Best effort. */
+export async function removeEnvNetwork(environmentId) {
+  await docker(['network', 'rm', networkName(environmentId)]);
+  execute('DELETE FROM private_networks WHERE environment_id = ?', environmentId);
+}
+
 // ---------------------------------------------------------------- attaching
 
 /** Gives a running container its "<service>.morline.internal" name on the environment's private network. */

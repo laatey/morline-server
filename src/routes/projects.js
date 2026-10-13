@@ -1,3 +1,4 @@
+import { destroyProject } from '../services/service-cleanup.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { execute, queryOne, queryAll, transaction } from '../db/index.js';
@@ -78,10 +79,15 @@ router.patch('/:projectId', (req, res, next) => {
 });
 
 // DELETE /projects/:projectId
-router.delete('/:projectId', (req, res) => {
-  const { project } = checkProjectAccess(req.params.projectId, req.user.id);
-  execute('DELETE FROM projects WHERE id = ?', project.id);
-  return res.status(204).end();
+router.delete('/:projectId', async (req, res, next) => {
+  try {
+    const { project } = checkProjectAccess(req.params.projectId, req.user.id);
+    await destroyProject(project.id); // stops containers and removes files before the rows go
+    execute('DELETE FROM projects WHERE id = ?', project.id);
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /projects/:projectId/duplicate

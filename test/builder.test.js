@@ -69,7 +69,7 @@ test('JSON is pulled out of fenced or chatty replies', () => {
 });
 
 test('resource limits must fit what the host has left', () => {
-  const env = { MORLINE_CAPACITY_CPUS: '4', MORLINE_CAPACITY_MEMORY_MB: '8192', MORLINE_RESERVED_CPUS: '1', MORLINE_RESERVED_MEMORY_MB: '1024', MORLINE_DEFAULT_MEMORY_MB: '1024', MORLINE_DEFAULT_CPUS: '1' };
+  const env = { MORLINE_CAPACITY_CPUS: '4', MORLINE_CAPACITY_MEMORY_MB: '8192', MORLINE_RESERVED_CPUS: '1', MORLINE_RESERVED_MEMORY_MB: '1024', MORLINE_DEFAULT_MEMORY_MB: '256', MORLINE_DEFAULT_CPUS: '0.2' };
   const r = capacityReport({ env });
   assert.equal(r.cpu.total, 4);
   assert.ok(r.cpu.available <= 3);
@@ -222,4 +222,40 @@ test('pending actions can be dismissed once', () => {
   const id = newAction('create_app', { name: 'n', files: [] });
   assert.equal(dismissAction(row(id), owner).status, 'dismissed');
   assert.throws(() => dismissAction(row(id), owner), (e) => e.code === 'action_stale');
+});
+
+// --- what counts against the host ------------------------------------------------------------------
+
+const { computeCapacity, startProblem } = await import('../src/engine/capacity.js');
+const capEnv = { MORLINE_CAPACITY_CPUS: '2', MORLINE_CAPACITY_MEMORY_MB: '2048', MORLINE_RESERVED_CPUS: '0', MORLINE_RESERVED_MEMORY_MB: '512', MORLINE_DEFAULT_MEMORY_MB: '256', MORLINE_DEFAULT_CPUS: '0.2' };
+
+test('only services holding a container count; stopped, sleeping and crashed ones give their share back', () => {
+  const rows = [
+    { id: 'a', status: 'online', cpu_limit: null, memory_limit_mb: null },
+    { id: 'b', status: 'deploying', cpu_limit: 0.5, memory_limit_mb: 512 },
+    { id: 'c', status: 'stopped', cpu_limit: 1, memory_limit_mb: 1024 },
+    { id: 'd', status: 'sleeping', cpu_limit: 1, memory_limit_mb: 1024 },
+    { id: 'e', status: 'crashed', cpu_limit: 1, memory_limit_mb: 1024 },
+    { id: 'f', status: 'created', cpu_limit: 1, memory_limit_mb: 1024 }
+  ];
+  const r = computeCapacity(rows, { env: capEnv });
+  assert.equal(r.cpu.allocated, 0.7);
+  assert.equal(r.memory.allocatedMb, 768);
+  assert.equal(r.memory.availableMb, 2048 - 512 - 768);
+});
+
+test('a service that gave its resources up cannot come back when someone else took them', () => {
+  const rows = [
+    { id: 'big', status: 'online', cpu_limit: 1.5, memory_limit_mb: 1536 },
+    { id: 'sleepy', status: 'sleeping', cpu_limit: 1, memory_limit_mb: 1024 }
+  ];
+  const problem = startProblem(rows, rows[1], { env: capEnv });
+  assert.match(problem, /Not enough capacity/);
+  assert.match(problem, /1 vCPU/);
+  assert.equal(startProblem([{ id: 'big', status: 'online', cpu_limit: 1, memory_limit_mb: 512 }, rows[1]], rows[1], { env: capEnv }), null);
+});
+
+test('a running service is not blocked by its own allocation', () => {
+  const rows = [{ id: 'x', status: 'online', cpu_limit: 2, memory_limit_mb: 1536 }];
+  assert.equal(startProblem(rows, rows[0], { env: capEnv }), null);
 });

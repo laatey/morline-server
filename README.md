@@ -25,9 +25,17 @@ Ask in the dashboard's assistant and it routes the request: a plain answer, **bu
 
 It needs an AI provider key (see `.env.example`) and the team's GitHub connection. Creating repositories uses the connected user's OAuth token for personal accounts. The implementation is in `src/services/builder/` (generation, diffs, validation), `src/services/github-repo.js` and `src/services/assistant-actions.js`.
 
+## Deleting
+
+Deleting a service removes everything that belongs to it: the container and its images, domains, variables, port allocations, deployments and logs, its source checkout and env file, volume data and database backups. Deleting an environment, project or team does the same for every service inside it, and also releases the environments' private networks. Activity history and billing usage are kept. On startup Morline clears domains and variables that older versions orphaned; folders left by deleted services are only reported, and `MORLINE_SWEEP_ORPHAN_FILES=1` removes them.
+
+## Live updates
+
+`GET /v1/environments/:id/events` is a server-sent event stream (service, deployment, domain, connection and canvas events, plus a `log` ping when new log lines arrive). Browsers can't set headers on `EventSource`, so this endpoint, and the other `.../stream` and `.../events` GETs, also accept `?token=`. The dashboard uses it instead of polling and falls back to polling if it drops.
+
 ## Resources
 
-CPU and memory sliders draw on what the host has left: its CPUs and RAM, minus a reserve for the OS and Morline, minus every running service's allocation (`GET /v1/infrastructure/capacity`). Raising a limit past what's free is rejected by the API, and changes are applied to the running container without a redeploy. Tune the reserve with `MORLINE_RESERVED_*` or cap the pool with `MORLINE_CAPACITY_*`.
+CPU and memory sliders draw on what the host has left. Only services that hold a container count (online, deploying, building); stopped, sleeping, crashed and never-deployed services give their share back. Starting one of them again (restart, wake or a deploy) has to fit in what is free at that moment, otherwise the API answers `409 insufficient_capacity` and a deployment fails early with the same message, before any clone or build. The pool is: its CPUs and RAM, minus a reserve for the OS and Morline, minus every running service's allocation (`GET /v1/infrastructure/capacity`). Services with no limit of their own get a lean default (0.2 vCPU, 256 MB), so a 2 GB / 2 vCPU host fits four or five at once. Raising a limit past what's free is rejected by the API, and changes are applied to the running container without a redeploy. Tune the reserve with `MORLINE_RESERVED_*` or cap the pool with `MORLINE_CAPACITY_*`.
 
 **Docker image services** skip clone and build: Morline pulls the image (public registries), uses the port you gave or the one the image exposes, and runs it with the same variables, volumes, limits and health checks. Image references are validated before they reach the Docker CLI.
 

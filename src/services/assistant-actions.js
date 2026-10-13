@@ -1,8 +1,7 @@
+import { destroyService } from './service-cleanup.js';
 import crypto from 'node:crypto';
 import { execute, queryOne } from '../db/index.js';
 import { mapAction } from '../db/mappers.js';
-import { containerSupervisor } from '../engine/container-supervisor.js';
-import { eventBus } from '../engine/event-bus.js';
 import { AppError, forbidden, notFound } from '../middleware/error-handler.js';
 import { GitHubError, withGithub, createRepoForTeam, getRepo, getBranchHead, commitFiles, createBranch, createPullRequest } from './github-repo.js';
 import { createRepoService, startDeployment } from './service-factory.js';
@@ -130,12 +129,7 @@ async function runCreateApp(row, user, team) {
 async function revertCreateApp(row) {
   const result = parse(row.result, {}) || {};
   if (result.serviceId) {
-    const service = queryOne('SELECT * FROM services WHERE id = ?', result.serviceId);
-    if (service) {
-      await containerSupervisor.stopService(service.id, true);
-      execute('DELETE FROM services WHERE id = ?', service.id);
-      eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.deleted', at: new Date().toISOString(), actorId: null, canvasRevision: null, data: { id: service.id } });
-    }
+    await destroyService(result.serviceId);
   }
   return { ...result, serviceRemoved: true };
 }

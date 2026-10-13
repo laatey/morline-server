@@ -318,7 +318,7 @@ async function answerQuestion(thread, userContent, history) {
 
   let crashedLogs = '';
   for (const s of crashedServices) {
-    const logs = logManager.getLogs({ serviceId: s.id, limit: 15 });
+    const logs = logManager.getServiceLogs(s.id, { limit: 15 });
     if (logs.length > 0) {
       crashedLogs += `\nLogs for service ${s.name} (CRASHED):\n` + logs.map((l) => `[${l.level}] ${l.message}`).join('\n');
     }

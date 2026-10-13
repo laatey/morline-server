@@ -12,6 +12,7 @@ import { mapDomain } from './db/mappers.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { sweepOrphans } from './services/service-cleanup.js';
 import { rateLimit } from './middleware/rate-limit.js';
 import infrastructureRouter from './routes/infrastructure.js';
 import { enforceTenancy } from './middleware/tenancy.js';
@@ -40,6 +41,19 @@ import templatesRouter from './routes/templates.js';
 
 // Initialize Database & Seeds
 initDb();
+
+// Clear out rows that earlier versions left behind after deletes (domains, variables).
+try {
+  const swept = sweepOrphans();
+  if (swept.domains || swept.variables || swept.stagedChanges) {
+    console.log(`[Cleanup] Removed ${swept.domains} orphaned domains, ${swept.variables} orphaned variables, ${swept.stagedChanges} stale staged changes`);
+  }
+  if (swept.folders.length) {
+    console.log(`[Cleanup] ${swept.folders.length} folders belong to deleted services (${swept.folders.slice(0, 5).join(', ')}${swept.folders.length > 5 ? ', ...' : ''}). Set MORLINE_SWEEP_ORPHAN_FILES=1 to delete them.`);
+  }
+} catch (err) {
+  console.warn('[Cleanup] Startup sweep failed:', err.message);
+}
 startMetering();
 containerSupervisor.startWatchdog();
 setTimeout(() => containerSupervisor.restoreServices().catch((err) => console.warn('[Restore] Failed:', err.message)), 3000).unref();

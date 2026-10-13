@@ -1,3 +1,4 @@
+import { destroyService } from '../services/service-cleanup.js';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -19,7 +20,7 @@ import { normalizeHost, hostProblem, newToken, dnsRecordsFor, detectCloudflare }
 import { listRepoDirectories } from '../services/repo-directories.js';
 import { listCollections, readRows, connectionInfo, listBackups, startBackup, startRestore, describeDatabase } from '../engine/database-manager.js';
 import { APPS_DIR, DATA_DIR, BASE_DOMAIN } from '../config.js';
-import { validateLimits } from '../engine/capacity.js';
+import { validateLimits, assertCanRun } from '../engine/capacity.js';
 import { isValidImageRef } from '../engine/image-ref.js';
 import { clearStagedChanges, createStagedChange, syncConnectionsWithVariables } from '../services/staged-changes-helper.js';
 
@@ -207,26 +208,23 @@ router.patch('/services/:serviceId', (req, res, next) => {
 });
 
 // DELETE /services/:serviceId
-router.delete('/services/:serviceId', async (req, res) => {
-  const service = getService(req.params.serviceId);
-  await containerSupervisor.stopService(service.id, true);
-  execute('DELETE FROM services WHERE id = ?', service.id);
-
-  eventBus.emitEnvironmentEvent(service.environment_id, {
-    type: 'service.deleted',
-    at: new Date().toISOString(),
-    actorId: req.user.id,
-    canvasRevision: null,
-    data: { id: service.id }
-  });
-
-  return res.status(204).end();
+// Removes the service and everything that belongs to it (container, images, domains, variables,
+// ports, source files, volume data, backups). See services/service-cleanup.js.
+router.delete('/services/:serviceId', async (req, res, next) => {
+  try {
+    const service = getService(req.params.serviceId);
+    await destroyService(service.id, { actorId: req.user.id });
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /services/:serviceId/restart
 router.post('/services/:serviceId/restart', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
+    assertCanRun(service.id); // 409 insufficient_capacity when the host has no room left
     reviveFromStop(service.id, { reviveDeployment: true });
     execute('UPDATE services SET status = ? WHERE id = ?', 'deploying', service.id);
 
@@ -339,6 +337,7 @@ router.post('/services/:serviceId/sleep', async (req, res) => {
 router.post('/services/:serviceId/wake', async (req, res, next) => {
   try {
     const service = getService(req.params.serviceId);
+    assertCanRun(service.id); // 409 insufficient_capacity when the host has no room left
     reviveFromStop(service.id);
     execute('UPDATE services SET status = ? WHERE id = ?', 'deploying', service.id);
 

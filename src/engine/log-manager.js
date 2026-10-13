@@ -37,6 +37,14 @@ class LogManager {
     }
   }
 
+  /** The newest `limit` log lines for a service across its deployments, oldest first. */
+  getServiceLogs(serviceId, { limit = 15 } = {}) {
+    return queryAll(
+      'SELECT level, message, timestamp FROM deployment_logs WHERE service_id = ? ORDER BY timestamp DESC LIMIT ?',
+      serviceId, limit
+    ).reverse();
+  }
+
   getDeploymentLogs(deploymentId, { limit = 100, cursor = null, level = null, q = null, phase = null } = {}) {
     let sql = 'SELECT * FROM deployment_logs WHERE deployment_id = ?';
     const params = [deploymentId];

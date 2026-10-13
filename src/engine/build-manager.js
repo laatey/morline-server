@@ -1,3 +1,4 @@
+import { assertCanRun } from './capacity.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -212,6 +213,9 @@ server.listen(port, '0.0.0.0', () => {
   async _pipeline(ctx, service) {
     const { serviceId, deploymentId } = ctx;
     const settings = queryOne('SELECT * FROM service_settings WHERE service_id = ?', serviceId) || {};
+
+    // Fail early, before cloning or building, when the host has no room for this service.
+    assertCanRun(serviceId);
 
     execute('UPDATE deployments SET state = ?, started_at = ? WHERE id = ?', 'building', new Date().toISOString(), deploymentId);
     execute('UPDATE services SET building_deployment_id = ? WHERE id = ?', deploymentId, serviceId);

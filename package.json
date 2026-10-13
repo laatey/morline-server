@@ -8,10 +8,10 @@
   "scripts": {
     "start": "node --no-warnings src/index.js",
     "dev": "node --no-warnings --watch src/index.js",
-    "test": "node --test --test-concurrency=1 test/runtime-resolver.test.js test/volumes.test.js test/udp.test.js test/hardening.test.js test/rate-limit.test.js test/auth.test.js test/tenancy.test.js test/oauth-state.test.js test/builder.test.js test/docker-image.test.js",
+    "test": "node --test --test-concurrency=1 test/runtime-resolver.test.js test/volumes.test.js test/udp.test.js test/hardening.test.js test/rate-limit.test.js test/auth.test.js test/tenancy.test.js test/oauth-state.test.js test/builder.test.js test/docker-image.test.js test/cleanup.test.js",
     "test:runtime": "node --test test/runtime-resolver.test.js",
     "test:volumes": "node --test test/volumes.test.js",
-    "test:udp": "node --test test/udp.test.js test/hardening.test.js test/rate-limit.test.js test/auth.test.js test/tenancy.test.js test/oauth-state.test.js test/builder.test.js test/docker-image.test.js"
+    "test:udp": "node --test test/udp.test.js test/hardening.test.js test/rate-limit.test.js test/auth.test.js test/tenancy.test.js test/oauth-state.test.js test/builder.test.js test/docker-image.test.js test/cleanup.test.js"
   },
   "engines": {
     "node": ">=22"

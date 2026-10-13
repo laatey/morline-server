@@ -256,6 +256,23 @@ export class ContainerSupervisor {
     }
   }
 
+  /** Remove the images (and compose volumes) a deleted service built, so disk isn't leaked. Best effort. */
+  async purgeArtifacts(serviceId) {
+    const safe = safeName(serviceId);
+    const list = async (args) => {
+      let out = '';
+      try { await run('docker', args, { onLine: (_, line) => { out += `${line}\n`; } }); } catch { /* docker unavailable */ }
+      return out.split('\n').map((l) => l.trim()).filter(Boolean);
+    };
+    const images = [
+      ...await list(['images', '--format', '{{.ID}}', '--filter', `reference=morline/${safe}`]),
+      ...await list(['images', '--format', '{{.ID}}', '--filter', `reference=morline-${safe}-*`])
+    ];
+    const volumes = await list(['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=morline-${safe}`]);
+    if (images.length) { try { await run('docker', ['rmi', '--force', ...new Set(images)]); } catch { /* still in use elsewhere */ } }
+    if (volumes.length) { try { await run('docker', ['volume', 'rm', '--force', ...volumes]); } catch { /* ignore */ } }
+  }
+
   /** `docker pull`, streaming progress lines to `onLog`. Throws a message a user can act on. */
   async pullImage(image, onLog = () => {}) {
     try {
