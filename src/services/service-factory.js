@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DATA_DIR } from '../config.js';
 import { execute, queryOne, transaction } from '../db/index.js';
 import { mapService } from '../db/mappers.js';
 import { eventBus } from '../engine/event-bus.js';
@@ -7,7 +10,7 @@ import { buildManager } from '../engine/build-manager.js';
 const rid = (prefix) => `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
 /** Create a service that builds from a GitHub repo. Returns the service row. */
-export function createRepoService({ environmentId, name, repo, branch, port = 3000, variables = [] }) {
+export function createRepoService({ environmentId, name, repo, branch, port = 3000, variables = [], volume = null }) {
   const env = queryOne('SELECT * FROM environments WHERE id = ?', environmentId);
   if (!env) throw new Error('The environment for this app no longer exists');
 
@@ -29,6 +32,14 @@ export function createRepoService({ environmentId, name, repo, branch, port = 30
       VALUES (?, ?, 1, '/health', 30, 'on-failure', 1)
     `, serviceId, branch);
     execute('INSERT INTO service_networking (service_id, public, target_port) VALUES (?, 1, ?)', serviceId, port);
+    if (volume) {
+      const volId = rid('vol');
+      execute(`
+        INSERT INTO volumes (id, service_id, name, mount_path, size_gb, used_gb, created_at)
+        VALUES (?, ?, 'data', ?, ?, 0.0, ?)
+      `, volId, serviceId, volume.mountPath, volume.sizeGb, now);
+      try { fs.mkdirSync(path.join(DATA_DIR, 'service-volumes', serviceId, volId), { recursive: true }); } catch { /* created on first start */ }
+    }
     for (const v of variables) {
       execute(`
         INSERT INTO variables (id, scope_type, scope_id, key, value, secret, created_at, updated_at)

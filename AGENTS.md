@@ -6,7 +6,7 @@
 - Canvas edits that need a deploy are recorded as staged changes (`src/services/staged-changes-helper.js`), not applied immediately.
 - Secrets come from the environment only. Never add a default value for a key, token or password in `src/config.js`, and document every new variable in `.env.example`.
 - New routes that reference a team-owned resource need its kind added to `src/middleware/tenancy.js` (path rule or field) so cross-team access stays blocked.
-- Assistant actions run in `src/services/assistant-actions.js`; add a new type there with `apply` and `revert` executors, a diff for the review UI, and a test with the fake GitHub in `test/builder.test.js`. The AI only proposes: never run model output.
+- Assistant actions run in `src/services/assistant-actions.js`; add a new type there with `apply` and `revert` executors, a diff for the review UI, and a test with the fake GitHub in `test/builder.test.js`. The AI only proposes: never run model output. Model output for code uses tagged blocks (`src/services/builder/format.js`), not JSON, so a cut-off reply can't corrupt whole files; keep it that way.
 - Tests are `node:test` files in `test/`; run `npm test` before shipping. Real AWS identifiers stay out of git (`deploy-wizard/config.json` is ignored).
 
 <!-- BEGIN AWS Agent Toolkit rules -->

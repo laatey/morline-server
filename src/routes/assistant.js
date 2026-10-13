@@ -364,13 +364,13 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
   }
 
   progress('Designing the application');
-  const app = await generateNewApp({ prompt: userContent, history });
+  const app = await generateNewApp({ prompt: userContent, history, onStep: progress });
   const diff = describeChanges(app.files.map((f) => ({ path: f.path, action: 'create', before: '', after: f.content })));
   const extra = app.envVars.filter((v) => !v.generate);
   const text = [
     `I wrote **${app.name}**${app.description ? `: ${app.description}` : '.'}`,
     app.notes,
-    `Applying this creates a private GitHub repository with ${app.files.length} files and deploys it as a new service.`
+    `Applying this creates a private GitHub repository with ${app.files.length} files${app.volume ? `, attaches a ${app.volume.sizeGb} GB volume at \`${app.volume.mountPath}\`` : ''} and deploys it as a new service.`
       + (app.envVars.some((v) => v.generate) ? ` Secrets such as ${app.envVars.filter((v) => v.generate).map((v) => `\`${v.key}\``).join(', ')} are generated for you.` : ''),
     extra.length ? `You will need to set: ${extra.map((v) => `\`${v.key}\`${v.description ? ` (${v.description})` : ''}`).join(', ')}.` : ''
   ].filter(Boolean).join('\n\n');
@@ -384,7 +384,7 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
       risk: 'medium',
       reversible: true,
       targets: [{ type: 'environment', id: environmentId }],
-      payload: { name: app.name, description: app.description, port: app.port, envVars: app.envVars, files: app.files, environmentId, projectId: thread.project_id },
+      payload: { name: app.name, description: app.description, port: app.port, envVars: app.envVars, volume: app.volume, files: app.files, environmentId, projectId: thread.project_id },
       diff
     }]
   };
@@ -414,8 +414,7 @@ async function proposeCodeChange({ thread, team, route, userContent, history, pr
     return { branch, baseSha, tree, readFile: (entry) => getBlobText(t, repo, entry.sha) };
   });
 
-  progress('Writing the change');
-  const out = await generateChange({ prompt: userContent, repo, tree, readFile, history });
+  const out = await generateChange({ prompt: userContent, repo, tree, readFile, history, onStep: progress });
   if (!out.changes.length) return { text: out.summary || 'I could not find a change to make for that. Tell me more about what you want.' };
 
   const message = firstSentence(out.summary) || 'Update from the Morline assistant';

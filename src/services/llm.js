@@ -10,7 +10,29 @@ export function llmConfigured() {
   return Boolean(AI_GATEWAY_KEY || ANTHROPIC_API_KEY || OPENAI_API_KEY || GEMINI_API_KEY);
 }
 
-async function chatCompletions(baseUrl, key, model, system, messages, { maxTokens, temperature }) {
+/** Read a server-sent event body, calling `onData(parsedJson)` for each `data:` line. */
+async function readSse(res, onData) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try { onData(JSON.parse(payload)); } catch { /* ignore keep-alives and partial frames */ }
+    }
+  }
+}
+
+const isEventStream = (res) => (res.headers.get('content-type') || '').includes('text/event-stream');
+
+async function chatCompletions(baseUrl, key, model, system, messages, { maxTokens, temperature, onText }) {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
@@ -18,18 +40,34 @@ async function chatCompletions(baseUrl, key, model, system, messages, { maxToken
       model,
       temperature,
       max_tokens: maxTokens,
+      stream: Boolean(onText),
       messages: [{ role: 'system', content: system }, ...messages]
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS)
   });
   if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content;
+
+  let text = '';
+  let truncated = false;
+  if (onText && isEventStream(res)) {
+    await readSse(res, (o) => {
+      const choice = o.choices?.[0];
+      const delta = choice?.delta?.content;
+      if (delta) { text += delta; onText(delta); }
+      if (choice?.finish_reason === 'length') truncated = true;
+    });
+  } else {
+    // Not streamed (or a gateway that answers in one piece).
+    const data = await res.json();
+    text = data.choices?.[0]?.message?.content || '';
+    truncated = data.choices?.[0]?.finish_reason === 'length';
+    if (text && onText) onText(text);
+  }
   if (!text) throw new Error('empty response');
-  return text;
+  return { text, truncated };
 }
 
-async function anthropic(system, messages, { maxTokens, temperature }) {
+async function anthropic(system, messages, { maxTokens, temperature, onText }) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
@@ -38,15 +76,28 @@ async function anthropic(system, messages, { maxTokens, temperature }) {
       system,
       messages,
       temperature,
-      max_tokens: maxTokens
+      max_tokens: maxTokens,
+      stream: Boolean(onText)
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS)
   });
   if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-  const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+
+  let text = '';
+  let truncated = false;
+  if (onText && isEventStream(res)) {
+    await readSse(res, (o) => {
+      if (o.type === 'content_block_delta' && o.delta?.type === 'text_delta' && o.delta.text) { text += o.delta.text; onText(o.delta.text); }
+      if (o.type === 'message_delta' && o.delta?.stop_reason === 'max_tokens') truncated = true;
+    });
+  } else {
+    const data = await res.json();
+    text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    truncated = data.stop_reason === 'max_tokens';
+    if (text && onText) onText(text);
+  }
   if (!text) throw new Error('empty response');
-  return text;
+  return { text, truncated };
 }
 
 /**
@@ -54,8 +105,8 @@ async function anthropic(system, messages, { maxTokens, temperature }) {
  * order (gateway, Anthropic, OpenAI, Gemini); the first one that answers wins.
  * `messages` is a list of `{ role: 'user' | 'assistant', content }`.
  */
-export async function complete({ system, messages, maxTokens = 4096, temperature = 0.2 }) {
-  const opts = { maxTokens, temperature };
+export async function completeDetailed({ system, messages, maxTokens = 4096, temperature = 0.2, onText }) {
+  const opts = { maxTokens, temperature, onText };
   const providers = [];
   if (AI_GATEWAY_KEY) {
     providers.push(['gateway', () => chatCompletions(AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL || 'google/gemini-2.5-flash', system, messages, opts)]);
@@ -81,6 +132,34 @@ export async function complete({ system, messages, maxTokens = 4096, temperature
     }
   }
   throw new Error(`No AI provider could complete the request (${failures.join('; ')})`);
+}
+
+/** Same as `completeDetailed` but returns just the text. */
+export async function complete(options) {
+  return (await completeDetailed(options)).text;
+}
+
+/**
+ * For long structured output: keeps asking the model to continue while the reply was cut off
+ * (the provider says so, or `isComplete(text)` says the format isn't closed). `onText(delta, soFar)`
+ * receives every streamed piece with the full text so far.
+ */
+export async function completeLong({ system, messages, maxTokens = 16000, temperature = 0.2, onText, isComplete, maxRounds = 3 }) {
+  let text = '';
+  for (let round = 0; round < maxRounds; round++) {
+    const convo = round === 0
+      ? messages
+      : [...messages, { role: 'assistant', content: text }, { role: 'user', content: 'Your reply was cut off. Continue exactly where it stopped. Do not repeat anything and do not add any preamble.' }];
+    const prefix = text;
+    const part = await completeDetailed({
+      system, messages: convo, maxTokens, temperature: round ? 0 : temperature,
+      onText: onText ? (delta) => onText(delta, prefix + delta) : undefined
+    });
+    text += part.text;
+    if (!part.truncated && isComplete(text)) return text;
+    if (!part.truncated && round > 0) return text; // the model finished; trust it rather than looping
+  }
+  return text;
 }
 
 /** Single-turn convenience wrapper. */

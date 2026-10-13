@@ -28,7 +28,7 @@ export function publicAction(row) {
   const p = action.payload || {};
   action.payload = {
     repo: p.repo, branch: p.branch, mode: p.mode, serviceId: p.serviceId, name: p.name, port: p.port,
-    envVars: p.envVars, fileCount: (p.files || p.changes || []).length
+    envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length
   };
   return action;
 }
@@ -107,9 +107,10 @@ async function runCreateApp(row, user, team) {
     const variables = (payload.envVars || [])
       .filter((v) => v.generate)
       .map((v) => ({ key: v.key, value: crypto.randomBytes(24).toString('hex'), secret: true }));
+    if (payload.volume) variables.push({ key: 'DATA_DIR', value: payload.volume.mountPath, secret: false });
     const service = createRepoService({
       environmentId: payload.environmentId, name: slugify(payload.name), repo: result.repo.fullName,
-      branch: result.repo.branch, port: payload.port, variables
+      branch: result.repo.branch, port: payload.port, variables, volume: payload.volume
     });
     result.serviceId = service.id;
     result.generatedVariables = variables.map((v) => v.key);
