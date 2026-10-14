@@ -349,7 +349,7 @@ async function answerQuestion(thread, userContent, history) {
 
   const system = `You are the Morline assistant, built into the Morline cloud platform. You help developers deploy, debug and configure services, databases, variables and domains.
 
-You can also build things: if the developer asks for a new app or API, or for a change to the code of a service that deploys from GitHub, you write the code, show them the exact files or diff, and only apply it after they approve. Mention this when it would help; don't claim to have changed anything yourself in a plain answer.
+You can also build things: if the developer asks for a new app or API, or for a change to a service's code, or reports that something broke, you do it: you write the code and Morline shows the exact diff as a card they can apply. Because that card is the confirmation, never ask "would you like me to...", "do you want me to proceed" or "shall I apply this". When they ask for something, do it. Ask a question only when you truly lack information you cannot work out yourself. In a plain answer don't claim to have changed anything.
 
 Current platform context:
 - Project ID: ${thread.project_id}
@@ -451,7 +451,7 @@ async function proposeCodeChange({ thread, team, route, userContent, history, pr
   const message = firstSentence(out.summary) || 'Update from the Morline assistant';
   const where = local ? `\`${service.name}\`` : `\`${branch}\` of \`${repo}\``;
   return {
-    text: `${out.summary}\n\nReview the diff below. Applying it ${local ? 'updates the files of' : `commits to ${where} and redeploys`}${local ? ` **${service.name}** and redeploys it` : ` **${service.name}**, or you can open a pull request instead`}.`,
+    text: `${stripPermissionAsks(out.summary)}\n\nReview the diff below. Applying it ${local ? 'updates the files of' : `commits to ${where} and redeploys`}${local ? ` **${service.name}** and redeploys it` : ` **${service.name}**, or you can open a pull request instead`}.`,
     actions: [{
       type: 'modify_code',
       title: message,
@@ -489,6 +489,37 @@ async function proposeFix({ thread, team, deploymentId, userContent, history, pr
   return out;
 }
 
+/** Drop trailing "Would you like me to…?" lines: the review card is the confirmation, not the chat. */
+function stripPermissionAsks(text) {
+  const ask = /^(would you like|do you want|shall i|should i|want me to|would you prefer|can i go ahead|let me know if you(?:'d| would) like|i can (?:apply|do) (?:this|that|it) (?:for you )?if)/i;
+  const paragraphs = String(text || '').trim().split(/\n{2,}/);
+  while (paragraphs.length > 1 && ask.test(paragraphs[paragraphs.length - 1].trim())) paragraphs.pop();
+  const last = paragraphs.length - 1;
+  const sentences = paragraphs[last].split(/(?<=[.!?])\s+/);
+  while (sentences.length > 1 && ask.test(sentences[sentences.length - 1].trim())) sentences.pop();
+  paragraphs[last] = sentences.join(' ');
+  return paragraphs.join('\n\n').trim();
+}
+
+const CONFIRMS = /^\s*(yes|yeah|yep|yup|sure|ok(ay)?|please|please do|go ahead|do it|proceed|apply( it| that)?|sounds good|fix it|yes please|y)\b[\s.!]*$/i;
+const REPORTS_BREAKAGE = /\b(crash(ed|es|ing)?|fail(ed|s|ing|ure)?|broke(n)?|not working|doesn'?t work|won'?t (start|build|deploy|run)|errors?|errored)\b/i;
+const OFFERED_CHANGE = /\b(apply|fix|change|redeploy|proceed|would you like|do you want)\b/i;
+
+/** The newest failed or crashed deployment that is still a service's latest one. */
+function latestBrokenDeployment(projectId, preferredServiceId) {
+  const rows = queryAll(`
+    SELECT d.id, d.service_id, d.service_name, d.state, d.created_at
+    FROM deployments d
+    JOIN services s ON s.id = d.service_id
+    JOIN environments e ON e.id = s.environment_id
+    WHERE e.project_id = ?
+      AND d.created_at = (SELECT MAX(d2.created_at) FROM deployments d2 WHERE d2.service_id = d.service_id)
+      AND d.state IN ('failed', 'crashed')
+    ORDER BY d.created_at DESC
+  `, projectId);
+  return rows.find((r) => r.service_id === preferredServiceId) || rows[0] || null;
+}
+
 async function respond({ thread, user, userContent, context, history, progress }) {
   if (!llmConfigured()) return { text: await answerQuestion(thread, userContent, history) };
 
@@ -507,22 +538,40 @@ async function respond({ thread, user, userContent, context, history, progress }
     }
   }
 
+  // Someone who reports a broken deploy, or says "yes" to a fix, wants it fixed, not another question.
+  const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')?.content || '';
+  const confirming = CONFIRMS.test(userContent) && OFFERED_CHANGE.test(lastAssistant);
+  const reporting = REPORTS_BREAKAGE.test(userContent) && !/^\s*(what|why|how|explain|can you explain)\b/i.test(userContent);
+  if (team && (confirming || reporting)) {
+    const broken = latestBrokenDeployment(thread.project_id, preferred);
+    if (broken) {
+      try {
+        return await proposeFix({ thread, team, deploymentId: broken.id, userContent, history, progress });
+      } catch (err) {
+        console.error('[Assistant] fix failed:', err.message);
+        return { text: `I couldn't work out a fix: ${err.message.replace(/\.$/, '')}.` };
+      }
+    }
+  }
+  // "Yes" to something proposed earlier: carry that out rather than starting a new conversation.
+  const message = confirming ? `Carry out what you just proposed:\n${lastAssistant.slice(0, 1500)}` : userContent;
+
   let route = { intent: 'answer', serviceId: preferred };
   try {
-    route = await classifyIntent({ message: userContent, services, history, preferredServiceId: preferred });
+    route = await classifyIntent({ message, services, history, preferredServiceId: preferred });
   } catch (err) {
     console.error('[Assistant] intent routing failed:', err.message);
   }
 
   try {
-    if (team && route.intent === 'build_app') return await proposeNewApp({ thread, team, userContent, history, progress });
-    if (team && route.intent === 'change_code') return await proposeCodeChange({ thread, team, route, userContent, history, progress });
+    if (team && route.intent === 'build_app') return await proposeNewApp({ thread, team, userContent: message, history, progress });
+    if (team && route.intent === 'change_code') return await proposeCodeChange({ thread, team, route, userContent: message, history, progress });
   } catch (err) {
     console.error('[Assistant] build failed:', err.message);
     return { text: `I couldn't put that together: ${err.message.replace(/\.$/, '')}.\n\nTry rephrasing, or break the request into smaller steps.` };
   }
   progress('Thinking');
-  return { text: await answerQuestion(thread, userContent, history) };
+  return { text: stripPermissionAsks(await answerQuestion(thread, userContent, history)) };
 }
 
 /** A 2-5 word name for a conversation. Falls back to the user's own words when no model is available. */
