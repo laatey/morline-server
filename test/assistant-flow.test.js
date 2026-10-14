@@ -6,6 +6,7 @@ const { initDb, execute, queryOne } = await import('../src/db/index.js');
 const { parseChangeOutput } = await import('../src/services/builder/format.js');
 const { createRepoService, writeWorkspaceFiles, listWorkspaceFiles, readWorkspaceFile, applyWorkspaceChanges } = await import('../src/services/service-factory.js');
 const { createAction, publicAction } = await import('../src/services/assistant-actions.js');
+const { summarizeFailure } = await import('../src/services/notifications.js');
 const { destroyService } = await import('../src/services/service-cleanup.js');
 
 initDb();
@@ -49,4 +50,11 @@ test('an applied action reports the state of the deployment it started', () => {
   const pub = publicAction(queryOne('SELECT * FROM assistant_actions WHERE id = ?', id));
   assert.equal(pub.deployment.state, 'failed');
   assert.equal(pub.deployment.error, 'boom');
+});
+
+test('a build failure is summarised in one readable line, not a Docker log dump', () => {
+  const raw = 'Unexpected build error: #0 building with "default" instance #1 [internal] load build definition #1 DONE 0.0s #8 ERROR: process "/bin/sh -c npm install --omit=dev" did not complete successfully: exit code: 1';
+  assert.equal(summarizeFailure(raw), 'The build failed while running "npm install --omit=dev" (exit code 1).');
+  assert.match(summarizeFailure('#0 building #1 [internal] load x #1 DONE 0.0s'), /Open the deployment in Morline/);
+  assert.match(summarizeFailure(''), /Open it in Morline/);
 });

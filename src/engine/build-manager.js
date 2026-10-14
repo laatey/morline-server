@@ -17,7 +17,7 @@ import {
 import { resolveRuntime } from './runtime-resolver.js';
 import { saveAppType } from './app-type.js';
 import { reviveFromStop } from './service-lifecycle.js';
-import { notify, recipientsForDeployment, projectLink } from '../services/notifications.js';
+import { notify, recipientsForDeployment, projectLink, summarizeFailure } from '../services/notifications.js';
 
 const { queryOne, execute } = dbModule;
 
@@ -788,7 +788,7 @@ server.listen(port, '0.0.0.0', () => {
         const name = queryOne('SELECT name FROM services WHERE id = ?', serviceId)?.name || 'Your service';
         notify(users, {
           type: 'deploy_failed', title: `Deployment of ${name} failed`,
-          body: summary.slice(0, 300), projectId, targetUrl: projectLink(projectId)
+          body: summarizeFailure(summary), projectId, targetUrl: projectLink(projectId), item: name
         });
       }
     } catch (dbErr) {

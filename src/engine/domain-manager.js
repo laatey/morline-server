@@ -13,7 +13,7 @@ function announce(updated, previousStatus) {
   if (!projectId || !['active', 'failed'].includes(updated.status)) return;
   notify(adminsOfProject(projectId), updated.status === 'active'
     ? { type: 'domain_active', title: `${updated.host} is live`, body: `${updated.host} now points to ${updated.service_name || 'your service'}.`, projectId, targetUrl: `/projects/${projectId}` }
-    : { type: 'domain_failed', title: `${updated.host} could not be verified`, body: updated.error || 'The DNS records were not found.', projectId, targetUrl: `/projects/${projectId}` });
+    : { type: 'domain_failed', title: `${updated.host} could not be verified`, body: updated.error || 'The DNS records were not found.', item: updated.host, projectId, targetUrl: `/projects/${projectId}` });
 }
 
 /**

@@ -14,7 +14,7 @@ import { execute, queryAll, queryOne } from '../db/index.js';
 import { logManager } from './log-manager.js';
 import { eventBus } from './event-bus.js';
 import { attachToPrivateNetwork, attachByLabel } from './private-network.js';
-import { notify, recipientsForDeployment, projectOfEnvironment, adminsOfProject, projectLink } from '../services/notifications.js';
+import { notify, recipientsForDeployment, projectOfEnvironment, adminsOfProject, projectLink, summarizeFailure } from '../services/notifications.js';
 
 const NETWORK = 'morline-runtime';
 const safeName = (value) => String(value).toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
@@ -520,7 +520,7 @@ export class ContainerSupervisor {
         notify(projectId ? adminsOfProject(projectId) : [], {
           type: 'service_crashed', title: `${service.name} crashed`,
           body: `The service stopped unexpectedly (exit code ${state.exitCode}). Open it to see the logs.`,
-          projectId, targetUrl: projectLink(projectId), dedupeKey: new Date(Date.now() - 3600_000).toISOString()
+          projectId, targetUrl: projectLink(projectId), item: service.name, dedupeKey: new Date(Date.now() - 3600_000).toISOString()
         });
       } else if (state.status === 'running' && service.status === 'crashed' && service.active_deployment_id === info.deploymentId) {
         execute("UPDATE services SET status = 'online' WHERE id = ?", serviceId);
@@ -569,7 +569,7 @@ export class ContainerSupervisor {
     const info = this.processes.get(serviceId);
     if (info) this.log(service, info, 'error', `[Deploy] ${summary}`);
     const { users, projectId } = recipientsForDeployment(deploymentId);
-    notify(users, { type: 'deploy_failed', title: `Deployment of ${service.name} failed`, body: summary.slice(0, 300), projectId, targetUrl: projectLink(projectId) });
+    notify(users, { type: 'deploy_failed', title: `Deployment of ${service.name} failed`, body: summarizeFailure(summary), projectId, targetUrl: projectLink(projectId), item: service.name });
     eventBus.emitEnvironmentEvent(service.environment_id, { type: 'deployment.updated', at, actorId: null, canvasRevision: null, data: { id: deploymentId, state: 'failed', errorSummary: summary } });
     eventBus.emitEnvironmentEvent(service.environment_id, { type: 'service.status', at, actorId: null, canvasRevision: null, data: { id: serviceId, status: 'crashed' } });
   }

@@ -12,9 +12,11 @@ import { FRONTEND_URL } from '../config.js';
  * domain_failed, spend_limit, invite, assistant_action.
  */
 
-const EMAIL_WORTHY = new Set(['deploy_failed', 'service_crashed', 'domain_failed', 'spend_limit', 'invite']);
+// 'invite' is not here: the invite route sends its own, richer email.
+const EMAIL_WORTHY = new Set(['deploy_failed', 'service_crashed', 'domain_failed', 'spend_limit']);
 
-export function notify(userIds, { type, title, body, projectId = null, targetUrl = null, dedupeKey = null }) {
+/** `item` names the service, domain or project the event is about; it only appears in the email's details table. */
+export function notify(userIds, { type, title, body, projectId = null, targetUrl = null, dedupeKey = null, item = null }) {
   const created = [];
   for (const userId of new Set([userIds].flat().filter(Boolean))) {
     // dedupeKey is matched against the type, user and project so a flapping service cannot flood an inbox.
@@ -34,7 +36,7 @@ export function notify(userIds, { type, title, body, projectId = null, targetUrl
       const user = queryOne(`SELECT u.email, u.name, s.email_notifications FROM users u
         LEFT JOIN user_settings s ON s.user_id = u.id WHERE u.id = ?`, userId);
       if (user && (user.email_notifications === null || user.email_notifications === undefined || user.email_notifications)) {
-        sendNotificationEmail({ to: user.email, name: user.name, title, body, url }).catch(() => {});
+        sendNotificationEmail({ to: user.email, type, title, body, url, item, projectName: projectId ? queryOne('SELECT name FROM projects WHERE id = ?', projectId)?.name : null }).catch(() => {});
       }
     }
   }
@@ -60,3 +62,22 @@ export function recipientsForDeployment(deploymentId) {
 }
 
 export const projectLink = (projectId) => (projectId ? `/projects/${projectId}` : '/projects');
+
+/**
+ * A one-line, human summary of a build or deploy failure. Raw error text can be a whole Docker build
+ * log squashed onto one line, which is unreadable in an inbox, so pull out what failed and why.
+ */
+export function summarizeFailure(raw) {
+  const text = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!text) return 'The deployment failed. Open it in Morline to see the logs.';
+  const step = text.match(/process "\/bin\/sh -c (.+?)" did not complete successfully: exit code: (\d+)/);
+  if (step) return `The build failed while running "${step[1].slice(0, 120)}" (exit code ${step[2]}).`;
+  const dockerfile = text.match(/ERROR: (failed to (?:build|solve)[^#]{0,160})/);
+  if (dockerfile) return dockerfile[1].trim().replace(/[:.]\s*$/, '') + '.';
+  const stripped = text
+    .replace(/^Unexpected build error:\s*/i, '')
+    .replace(/#\d+ (?:\[[^\]]*\]|DONE|CACHED|transferring|resolve|load|building)[^#]*/g, '')
+    .replace(/\s+/g, ' ').trim();
+  const out = stripped || 'The build failed. Open the deployment in Morline to see the full log.';
+  return out.length > 220 ? `${out.slice(0, 217).trimEnd()}...` : out;
+}

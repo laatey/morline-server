@@ -134,7 +134,7 @@ export function checkSpendLimits(now = new Date()) {
       type: 'spend_limit',
       title: reached ? `${project.name} reached its spend limit` : `${project.name} is at 80% of its spend limit`,
       body: `$${spentUsd.toFixed(2)} of the $${Number(project.limit_usd).toFixed(2)} monthly limit has been used.`,
-      projectId: project.id, targetUrl: projectLink(project.id), dedupeKey: monthStart
+      projectId: project.id, targetUrl: projectLink(project.id), item: project.name, dedupeKey: monthStart
     });
   }
 }
