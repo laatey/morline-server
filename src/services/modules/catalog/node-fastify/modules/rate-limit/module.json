@@ -1,0 +1,19 @@
+{
+  "id": "rate-limit", "name": "Rate limiting", "category": "security", "icon": "lucide:gauge", "order": 32,
+  "summary": "Per-IP request limits with 429 responses. Options: max, window, store (memory, or redis to share limits across instances). Override per route with config: { rateLimit: { max, timeWindow } }.",
+  "label": { "add": "Adding rate limiting", "remove": "Removing rate limiting" },
+  "options": {
+    "max": { "type": "int", "default": 100, "min": 1, "max": 10000, "description": "Requests allowed per window per client" },
+    "window": { "type": "enum", "values": ["1 second", "1 minute", "1 hour"], "default": "1 minute", "description": "Length of the window" },
+    "store": { "type": "enum", "values": ["memory", "redis"], "default": "memory", "description": "Where counters live; redis shares them between instances" }
+  },
+  "requiresWhen": { "store=redis": ["redis"] },
+  "wiring": { "phase": "security", "imports": ["import rateLimiting from './plugins/rate-limit.js';"], "register": ["await app.register(rateLimiting);"] },
+  "readme": { "features": ["- **Rate limiting**: per-IP limits with `429` responses, configured in `src/plugins/rate-limit.js`"] },
+  "deps": { "@fastify/rate-limit": "^10.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [
+    { "from": "rate-limit.memory.js", "to": "src/plugins/rate-limit.js", "when": { "store": "memory" } },
+    { "from": "rate-limit.redis.js", "to": "src/plugins/rate-limit.js", "when": { "store": "redis" } },
+    { "from": "rate-limit.test.js.tpl", "to": "test/rate-limit.test.js", "when": { "store": "memory" } }
+  ]
+}

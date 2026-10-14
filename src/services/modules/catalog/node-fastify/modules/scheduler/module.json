@@ -1,0 +1,12 @@
+{
+  "id": "scheduler", "name": "Scheduled jobs", "category": "jobs", "icon": "lucide:clock", "order": 53,
+  "summary": "Cron jobs inside the server. Add { name, schedule: '0 3 * * *', run: async (app) => {} } entries to the jobs array in src/jobs/index.js. Runs on every instance; use the queue for run-once work.",
+  "label": { "add": "Adding scheduled jobs", "remove": "Removing scheduled jobs" },
+  "wiring": { "phase": "features", "imports": ["import scheduler from './plugins/scheduler.js';"], "register": ["await app.register(scheduler);"] },
+  "readme": { "features": ["- **Scheduled jobs**: cron schedules defined in `src/jobs/index.js`"] },
+  "deps": { "node-cron": "^3.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [
+    { "from": "scheduler.js", "to": "src/plugins/scheduler.js" },
+    { "from": "jobs.js", "to": "src/jobs/index.js", "userOwned": true }
+  ]
+}

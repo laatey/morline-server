@@ -1,0 +1,12 @@
+{
+  "id": "email-sendgrid", "name": "SendGrid email", "category": "email", "capability": "email", "provider": "SendGrid", "icon": "sendgrid", "order": 60,
+  "summary": "Send email with SendGrid: import { sendEmail } from '../lib/email.js'; await sendEmail({ to, subject, html, text }).",
+  "label": { "add": "Adding SendGrid email", "remove": "Removing SendGrid email" },
+  "requires": ["http-client"],
+  "readme": { "features": ["- **Email**: `sendEmail()` in `src/lib/email.js`, sent through SendGrid"] },
+  "env": [
+    { "key": "SENDGRID_API_KEY", "required": true, "description": "SendGrid API key with Mail Send permission" },
+    { "key": "EMAIL_FROM", "required": false, "description": "Default sender address (use a domain verified with your email provider)", "example": "" }
+  ],
+  "files": [{ "from": "email.js", "to": "src/lib/email.js" }]
+}

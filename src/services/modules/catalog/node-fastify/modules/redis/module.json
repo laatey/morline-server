@@ -1,0 +1,11 @@
+{
+  "id": "redis", "name": "Redis", "category": "data", "icon": "redis", "order": 22,
+  "summary": "Redis (ioredis) client as app.redis. Use for caching, counters and shared state.",
+  "label": { "add": "Connecting Redis", "remove": "Removing Redis" },
+  "addons": ["redis"],
+  "wiring": { "phase": "data", "imports": ["import redis from './plugins/redis.js';"], "register": ["await app.register(redis);"] },
+  "readme": { "features": ["- **Redis**: client at `app.redis` for caching and shared state"] },
+  "env": [{ "key": "REDIS_URL", "required": true, "provisioned": true, "description": "Redis connection string (set automatically when a database is attached in Morline)" }],
+  "deps": { "ioredis": "^5.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [{ "from": "redis.js", "to": "src/plugins/redis.js" }]
+}

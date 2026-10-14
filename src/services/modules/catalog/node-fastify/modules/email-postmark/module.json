@@ -1,0 +1,12 @@
+{
+  "id": "email-postmark", "name": "Postmark email", "category": "email", "capability": "email", "provider": "Postmark", "icon": "postmark", "order": 60,
+  "summary": "Send email with Postmark: import { sendEmail } from '../lib/email.js'; await sendEmail({ to, subject, html, text }).",
+  "label": { "add": "Adding Postmark email", "remove": "Removing Postmark email" },
+  "requires": ["http-client"],
+  "readme": { "features": ["- **Email**: `sendEmail()` in `src/lib/email.js`, sent through Postmark"] },
+  "env": [
+    { "key": "POSTMARK_SERVER_TOKEN", "required": true, "description": "Postmark server API token" },
+    { "key": "EMAIL_FROM", "required": false, "description": "Default sender address (use a domain verified with your email provider)", "example": "" }
+  ],
+  "files": [{ "from": "email.js", "to": "src/lib/email.js" }]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "queue", "name": "Background jobs", "category": "jobs", "icon": "lucide:layers", "order": 52,
+  "summary": "Redis-backed job queue (BullMQ). createQueue(name).add(jobName, data) from the web app; put processors in src/workers/*.js (export queue and process) and run `node src/worker.js` as a separate worker service.",
+  "label": { "add": "Adding background jobs", "remove": "Removing background jobs" },
+  "requires": ["redis"],
+  "services": [{ "name": "worker", "start": "node src/worker.js", "description": "Processes background jobs from src/workers" }],
+  "readme": { "features": ["- **Background jobs**: BullMQ queues on Redis; run `node src/worker.js` as a second service to process `src/workers/*.js`"] },
+  "env": [{ "key": "WORKER_CONCURRENCY", "required": false, "description": "Jobs a worker processes at once (default 5)", "example": "5" }],
+  "deps": { "bullmq": "^5.0.0", "ioredis": "^5.0.0" },
+  "files": [
+    { "from": "queue.js", "to": "src/lib/queue.js" },
+    { "from": "worker.js", "to": "src/worker.js" }
+  ]
+}

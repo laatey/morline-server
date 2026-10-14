@@ -5,6 +5,7 @@ import { mapAction } from '../db/mappers.js';
 import { AppError, forbidden, notFound } from '../middleware/error-handler.js';
 import { GitHubError, withGithub, createRepoForTeam, getRepo, getBranchHead, commitFiles, createBranch, createPullRequest } from './github-repo.js';
 import { createRepoService, startDeployment, writeWorkspaceFiles, applyWorkspaceChanges } from './service-factory.js';
+import { provisionAddon, removeAddon } from './addons.js';
 import { slugify } from './builder/files.js';
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
@@ -30,6 +31,7 @@ export function publicAction(row) {
     repo: p.repo, branch: p.branch, mode: p.mode, serviceId: p.serviceId, name: p.name, port: p.port,
     envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length,
     local: p.local || undefined,
+    modules: p.modules, addons: p.addons, warnings: p.warnings, services: p.services,
     deploy: p.deploy, githubConnected: row.type === 'create_app' ? githubConnected(teamOf(row)?.team_id) : undefined
   };
   // Live state of the deployment this action started, so the chat can show Deploying / Live / Failed.
@@ -155,6 +157,8 @@ async function runCreateApp(row, user, team) {
     }
   }
 
+  provisionPayloadAddons({ payload, result, serviceId: result.serviceId, userId: user.id, save });
+
   if (!result.deploymentId) {
     result.deploymentId = startDeployment({
       serviceId: result.serviceId, userId: user.id, commitSha: result.commitSha || null,
@@ -165,11 +169,58 @@ async function runCreateApp(row, user, team) {
   return result;
 }
 
+/**
+ * Databases the generated code expects (the module engine's `addons`). Runs when an action is applied,
+ * before anything is deployed, so the app's first start already has its connection string. Each one is
+ * recorded in `result.addons` as it is created: a retry skips what exists, and revert removes it.
+ */
+function provisionPayloadAddons({ payload, result, serviceId, userId, save }) {
+  const wanted = Array.isArray(payload.addons) ? payload.addons : [];
+  if (!wanted.length) return;
+  const service = queryOne('SELECT name, environment_id FROM services WHERE id = ?', serviceId);
+  if (!service) return;
+  result.addons ??= [];
+  for (const a of wanted) {
+    if (result.addons.some((x) => x.kind === a.kind && x.env === a.env)) continue;
+    // The app already has this variable (it was wired up by hand): do not create a second database.
+    if (queryOne("SELECT 1 AS x FROM variables WHERE scope_type = 'service' AND scope_id = ? AND key = ?", serviceId, a.env)) continue;
+    result.addons.push(provisionAddon({ environmentId: service.environment_id, appServiceId: serviceId, appName: service.name, kind: a.kind, env: a.env, userId }));
+    save();
+  }
+}
+
+/** Variables the platform generates (for example JWT_SECRET) when a module is added to an existing service. */
+function provisionGeneratedVariables({ payload, result, serviceId, save }) {
+  const wanted = (Array.isArray(payload.envVars) ? payload.envVars : []).filter((v) => v.generate);
+  if (!wanted.length) return;
+  result.variables ??= [];
+  const now = new Date().toISOString();
+  for (const v of wanted) {
+    if (queryOne("SELECT 1 AS x FROM variables WHERE scope_type = 'service' AND scope_id = ? AND key = ?", serviceId, v.key)) continue;
+    const id = `var_${crypto.randomBytes(8).toString('hex')}`;
+    execute(`INSERT INTO variables (id, scope_type, scope_id, key, value, secret, created_at, updated_at) VALUES (?, 'service', ?, ?, ?, 1, ?, ?)`,
+      id, serviceId, v.key, crypto.randomBytes(24).toString('hex'), now, now);
+    result.variables.push({ id, key: v.key });
+    save();
+  }
+}
+
+/** Remove what apply created next to the code: databases, their variables and generated secrets. */
+async function removeProvisioned(result) {
+  for (const a of result.addons || []) {
+    if (a.variableId) execute('DELETE FROM variables WHERE id = ?', a.variableId);
+    await removeAddon(a);
+  }
+  for (const v of result.variables || []) execute('DELETE FROM variables WHERE id = ?', v.id);
+}
+
 async function revertCreateApp(row) {
   const result = parse(row.result, {}) || {};
   if (result.serviceId) {
     await destroyService(result.serviceId);
   }
+  // The databases this action created go too; they were made for this app and belong to nothing else.
+  for (const a of result.addons || []) await removeAddon(a);
   return { ...result, serviceRemoved: true };
 }
 
@@ -181,7 +232,28 @@ async function runModifyCode(row, user, team) {
   const p = parse(row.payload, {});
   const result = parse(row.result, {}) || {};
   const message = `${p.message}\n\nProposed by the Morline assistant, applied by ${user.name || user.email}`;
+  const save = () => update(row.id, { result: json(result) });
 
+  // Databases and generated secrets the new modules need must exist before the code that reads them
+  // is committed: a push can start a deployment on its own. If the change then fails, they are removed.
+  const hadAddons = new Set((result.addons || []).map((a) => a.kind));
+  const hadVariables = new Set((result.variables || []).map((v) => v.key));
+  if (p.serviceId && (p.addons?.length || p.envVars?.length)) {
+    provisionPayloadAddons({ payload: p, result, serviceId: p.serviceId, userId: user.id, save });
+    provisionGeneratedVariables({ payload: p, result, serviceId: p.serviceId, save });
+  }
+  try {
+    return await applyModifyChanges({ row, p, result, user, team, message });
+  } catch (err) {
+    const fresh = { addons: (result.addons || []).filter((a) => !hadAddons.has(a.kind)), variables: (result.variables || []).filter((v) => !hadVariables.has(v.key)) };
+    await removeProvisioned(fresh).catch((e) => console.error('[Assistant] cleanup after a failed change:', e.message));
+    result.addons = (result.addons || []).filter((a) => hadAddons.has(a.kind));
+    result.variables = (result.variables || []).filter((v) => hadVariables.has(v.key));
+    throw err;
+  }
+}
+
+async function applyModifyChanges({ row, p, result, user, team, message }) {
   if (p.local) {
     // A service deployed without GitHub: the files live in its build workspace.
     applyWorkspaceChanges(p.serviceId, toCommitChanges(p.changes));
@@ -224,6 +296,7 @@ async function revertModifyCode(row, user, team) {
       ? { path: c.path, action: 'delete' }
       : { path: c.path, action: 'update', content: c.before }));
     const next = { ...result, localReverted: true };
+    await removeProvisioned(result);
     next.revertDeploymentId = startDeployment({ serviceId: p.serviceId, userId: user.id, message: `Revert: ${p.message}` });
     return next;
   }
@@ -236,6 +309,7 @@ async function revertModifyCode(row, user, team) {
     return commitFiles(t, p.repo, { branch: p.branch, baseSha: head, message: `Revert: ${p.message}`, changes: undo });
   });
   const next = { ...result, revertCommitSha: commit.sha, revertCommitUrl: commit.url };
+  await removeProvisioned(result);
   if (p.serviceId && queryOne('SELECT 1 AS x FROM services WHERE id = ?', p.serviceId)) {
     next.revertDeploymentId = startDeployment({ serviceId: p.serviceId, userId: user.id, commitSha: commit.sha, message: `Revert: ${p.message}`, branch: p.branch });
   }

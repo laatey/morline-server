@@ -1,6 +1,16 @@
 import { completeJson, completeLong } from '../llm.js';
 import { parseBuildOutput, parseChangeOutput, stepReporter } from './format.js';
 import { validateNewFiles, resolveChanges, isReadable, slugify } from './files.js';
+import { getCatalog, createModuleBuilder, parseModuleOps, planModuleChange, changeAddendum, MANIFEST_PATH, EngineError } from '../modules/index.js';
+
+/** MODULE_ENGINE=off is the kill switch: everything falls back to the from-scratch builders. */
+const moduleEngineOn = () => String(process.env.MODULE_ENGINE || 'on').toLowerCase() !== 'off';
+
+let moduleBuilder = null;
+async function getModuleBuilder() {
+  moduleBuilder ??= createModuleBuilder({ catalog: await getCatalog(), completeLong });
+  return moduleBuilder;
+}
 
 const asHistory = (history = []) => history
   .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
@@ -62,7 +72,19 @@ the raw file contents, exactly as they should be saved: no escaping, no fences
 
 Rules for the plan: "volume" is only for apps that store files or data; use the storage size the user asked for (default 1) and keep "mountPath" equal to the directory you use for DATA_DIR. Omit "volume" otherwise. File contents must never contain the text </file>. Keep the project compact: only what is needed, typically 6 to 12 files.`;
 
-export async function generateNewApp({ prompt, history, onStep = () => {} }) {
+/**
+ * New apps. Node servers are composed from the module catalog (the model picks modules and writes only
+ * the app's own logic). Anything else, or MODULE_ENGINE=off, uses the from-scratch builder.
+ */
+export async function generateNewApp(args) {
+  if (moduleEngineOn()) {
+    const out = await (await getModuleBuilder()).generateNewApp(args);
+    if (!out.fallback) return out;
+  }
+  return generateNewAppFromScratch(args);
+}
+
+export async function generateNewAppFromScratch({ prompt, history, onStep = () => {} }) {
   const report = stepReporter(onStep);
   const text = await completeLong({
     system: BUILD_SYSTEM,
@@ -168,7 +190,23 @@ async function chooseFiles({ prompt, readable }) {
  * @param readFile  (entry) => Promise<string|null>
  * @returns {{ summary, changes }} where changes are resolved `{ path, action, before, after }`
  */
-export async function generateChange({ prompt, repo, tree, readFile, history, onStep = () => {} }) {
+/** Module ids recorded in the repo's .morline/modules.json, or null when the repo is not engine-generated. */
+async function installedModules(tree, readFile) {
+  const entry = tree.find((f) => f.path === MANIFEST_PATH);
+  if (!entry) return null;
+  try {
+    const manifest = JSON.parse(await readFile(entry));
+    return manifest && manifest.engine === 1 && manifest.modules ? Object.keys(manifest.modules) : null;
+  } catch { return null; }
+}
+
+export async function generateChange({ prompt, repo, tree, readFile, history, onStep = () => {}, modular = true }) {
+  const installed = modular && moduleEngineOn() ? await installedModules(tree, readFile) : null;
+  const catalog = installed ? await getCatalog() : null;
+  const system = installed ? CHANGE_SYSTEM + changeAddendum(catalog, installed) : CHANGE_SYSTEM;
+  // A reply that only adds or removes modules has no <change> blocks and is still complete.
+  const hasOps = (t) => { try { const o = parseModuleOps(t); return o.ops.length + o.resources.length > 0; } catch { return false; } };
+  const replyComplete = (t) => parseChangeOutput(t).complete || (Boolean(installed) && hasOps(t));
   const readable = tree.filter((f) => isReadable(f.path, f.size));
   onStep('Choosing the relevant files');
   const chosen = await chooseFiles({ prompt, readable });
@@ -185,37 +223,88 @@ export async function generateChange({ prompt, repo, tree, readFile, history, on
   const ask = async (messages) => {
     const report = stepReporter(onStep);
     const text = await completeLong({
-      system: CHANGE_SYSTEM, messages, maxTokens: 16000,
+      system, messages, maxTokens: 16000,
       onText: (_d, soFar) => report(soFar),
-      isComplete: (t) => parseChangeOutput(t).complete
+      isComplete: replyComplete
     });
     let out = parseChangeOutput(text);
-    if (!out.complete) {
+    if (!out.complete && !(installed && hasOps(text))) {
       // The model answered in prose or left a block open. Show it the format once more.
       const retry = await completeLong({
-        system: CHANGE_SYSTEM,
+        system,
         messages: [...messages, { role: 'assistant', content: text.slice(0, 6000) }, { role: 'user', content: 'That did not follow the required format. Reply again with ONLY a <summary> and the <change> blocks described in the instructions, with every tag closed.' }],
         maxTokens: 16000, temperature: 0,
         onText: (_d, soFar) => report(soFar),
-        isComplete: (t) => parseChangeOutput(t).complete
+        isComplete: replyComplete
       });
       out = parseChangeOutput(retry);
-      if (!out.complete) throw new Error('The model could not produce a valid change for that. Rephrase the request, or name the file you want changed.');
+      if (!out.complete && !(installed && hasOps(retry))) throw new Error('The model could not produce a valid change for that. Rephrase the request, or name the file you want changed.');
       return { text: retry, out };
     }
     return { text, out };
   };
 
-  let { text, out } = await ask(base);
-  if (!out.changes.length) return { summary: out.summary, changes: [] };
+  /**
+   * Turn the model's reply into changes. Module operations are planned by the engine (deterministic
+   * file edits); the model's own <change> blocks cover application code. Engine changes come first and
+   * the model may not touch a path the engine changed.
+   */
+  const assemble = async (text, out) => {
+    let engine = null;
+    if (installed) {
+      const { ops, resources } = parseModuleOps(text);
+      if (ops.length || resources.length) {
+        const paths = new Set(tree.map((f) => f.path));
+        const byPath = new Map(tree.map((f) => [f.path, f]));
+        engine = await planModuleChange(catalog, {
+          paths,
+          read: async (p) => (byPath.has(p) ? readFile(byPath.get(p)) : null),
+          ops, resources,
+          hooks: { onStep }
+        });
+      }
+    }
+    const engineChanges = engine?.changes ?? [];
+    const taken = new Set(engineChanges.map((c) => c.path));
+    const clash = out.changes.find((c) => taken.has(c.path));
+    if (clash) throw new Error(`${clash.path} is managed by a module change in the same reply. Do not edit it; application code goes elsewhere.`);
+    const own = out.changes.length ? resolveChanges(out.changes, contents, known) : [];
+    const changes = [...engineChanges, ...own];
+    if (!changes.length) return { summary: out.summary, changes: [] };
+    return {
+      summary: out.summary || engine?.summary || '',
+      changes,
+      filesRead: contents.size,
+      ...(engine ? {
+        engine: { envVars: engine.envVars, addons: engine.addons, services: engine.services, warnings: engine.warnings, modules: engine.modules }
+      } : {}),
+      // Removing files (a module's code) is a bigger step than editing them.
+      deletes: changes.filter((c) => c.action === 'delete').map((c) => c.path)
+    };
+  };
 
+  let text;
+  let out;
   try {
-    return { summary: out.summary, changes: resolveChanges(out.changes, contents, known), filesRead: contents.size };
+    ({ text, out } = await ask(base));
+    if (!out.changes.length && !(installed && hasOps(text))) return { summary: out.summary, changes: [] };
+    return await assemble(text, out);
   } catch (err) {
+    if (err instanceof EngineError && err.code === 'not_modular') {
+      return generateChange({ prompt, repo, tree, readFile, history, onStep, modular: false });
+    }
+    if (err instanceof EngineError && err.code === 'patch_conflict') {
+      // The user restructured a file a module wires into. Say so, then make the change by hand.
+      onStep('The module change needs a manual edit');
+      const manual = await generateChange({ prompt, repo, tree, readFile, history, onStep, modular: false });
+      return { ...manual, summary: `${err.message} I made the change by hand instead.\n\n${manual.summary || ''}`.trim() };
+    }
+    if (err instanceof EngineError) throw err; // user-safe: shown as is, never retried silently
+    if (!text) throw err;
     // One correction pass: tell the model exactly what was wrong with its output.
     onStep('Fixing a problem with the first attempt');
-    ({ out } = await ask([...base, { role: 'assistant', content: text.slice(0, 8000) }, { role: 'user', content: `That could not be applied: ${err.message}. Fix it and reply in the same format.` }]));
-    if (!out.changes.length) return { summary: out.summary, changes: [] };
-    return { summary: out.summary, changes: resolveChanges(out.changes, contents, known), filesRead: contents.size };
+    ({ text, out } = await ask([...base, { role: 'assistant', content: text.slice(0, 8000) }, { role: 'user', content: `That could not be applied: ${err.message}. Fix it and reply in the same format.` }]));
+    if (!out.changes.length && !(installed && hasOps(text))) return { summary: out.summary, changes: [] };
+    return await assemble(text, out);
   }
 }

@@ -1,0 +1,67 @@
+{
+  "id": "auth-jwt",
+  "name": "JWT authentication",
+  "category": "auth",
+  "icon": "lucide:key-round",
+  "order": 35,
+  "summary": "Bearer-token auth. Routes need a valid token unless they set config: { public: true }. Gives app.jwt.sign(), req.user, app.requireRole('admin'). Options: accessTtl, defaultAccess (protected|open).",
+  "label": {
+    "add": "Adding JWT authentication",
+    "remove": "Removing JWT authentication"
+  },
+  "options": {
+    "accessTtl": {
+      "type": "duration",
+      "default": "1h",
+      "description": "How long a signed token stays valid"
+    },
+    "defaultAccess": {
+      "type": "enum",
+      "values": [
+        "protected",
+        "open"
+      ],
+      "default": "protected",
+      "description": "protected: routes need a token unless marked public"
+    }
+  },
+  "wiring": {
+    "phase": "security",
+    "imports": [
+      "import auth from './plugins/auth.js';"
+    ],
+    "register": [
+      "await app.register(auth);"
+    ]
+  },
+  "readme": {
+    "features": [
+      "- **Authentication**: JWT bearer tokens; routes are protected unless they set `config: { public: true }`"
+    ]
+  },
+  "env": [
+    {
+      "key": "JWT_SECRET",
+      "required": true,
+      "generate": true,
+      "description": "Secret used to sign tokens, at least 32 characters (Morline generates one for you)"
+    }
+  ],
+  "deps": {
+    "@fastify/jwt": "^9.0.0",
+    "fastify-plugin": "^5.0.0"
+  },
+  "files": [
+    {
+      "from": "auth.js",
+      "to": "src/plugins/auth.js"
+    },
+    {
+      "from": "auth.test.js.tpl",
+      "to": "test/auth.test.js",
+      "when": {
+        "defaultAccess": "protected"
+      }
+    }
+  ]
+}

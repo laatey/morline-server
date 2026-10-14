@@ -1,0 +1,12 @@
+{
+  "id": "email-smtp", "name": "SMTP email", "category": "email", "capability": "email", "provider": "SMTP", "icon": "lucide:mail", "order": 60,
+  "summary": "Send email through any SMTP server (nodemailer): import { sendEmail } from '../lib/email.js'; await sendEmail({ to, subject, html, text }).",
+  "label": { "add": "Adding SMTP email", "remove": "Removing SMTP email" },
+  "readme": { "features": ["- **Email**: `sendEmail()` in `src/lib/email.js`, sent through your SMTP server"] },
+  "env": [
+    { "key": "SMTP_URL", "required": true, "description": "SMTP connection URL, for example smtps://user:password@smtp.example.com:465" },
+    { "key": "EMAIL_FROM", "required": false, "description": "Default sender address (use a domain verified with your email provider)", "example": "" }
+  ],
+  "deps": { "nodemailer": "^6.9.0" },
+  "files": [{ "from": "email.js", "to": "src/lib/email.js" }]
+}

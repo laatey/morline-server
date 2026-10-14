@@ -2813,14 +2813,31 @@ components:
         content: { type: string, description: Markdown }
         context: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
         toolCalls:
-          type: array
-          description: Steps shown as "Reading logs…" chips
-          items:
-            type: object
-            properties:
-              name: { type: string }
-              status: { type: string, enum: [running, done, error] }
-              summary: { type: string }
+          description: What the assistant did to produce this reply, kept so it survives a refresh. Older messages hold a plain array.
+          oneOf:
+            - type: object
+              properties:
+                steps:
+                  type: array
+                  description: Progress lines such as "Adding Resend email". A plain string, or an object when a logo applies.
+                  items:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        required: [text]
+                        properties:
+                          text: { type: string, example: Adding Resend email }
+                          icon:
+                            type: [string, "null"]
+                            description: A brand key (resend, stripe, postgresql, ...) or lucide:<name> for a generic icon
+                durationMs: { type: integer }
+            - type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  status: { type: string, enum: [running, done, error] }
+                  summary: { type: string }
         citations:
           type: array
           items: { $ref: "#/components/schemas/ContextRef" }
@@ -2838,14 +2855,38 @@ components:
         threadId: { type: string }
         type:
           type: string
-          enum: [set_variables, delete_variables, create_service, update_service_settings, delete_service, create_connection, delete_connection, redeploy, rollback, restart_service, add_domain, scale_service]
+          enum: [set_variables, delete_variables, create_service, update_service_settings, delete_service, create_connection, delete_connection, redeploy, rollback, restart_service, add_domain, scale_service, create_app, modify_code]
         status: { type: string, enum: [proposed, applying, applied, partially_applied, failed, dismissed, reverted, stale] }
         title: { type: string, example: "Set DATABASE_URL on api and redeploy" }
         description: { type: string }
         risk: { type: string, enum: [low, medium, high], description: "High = destructive, UI asks for confirmation" }
         reversible: { type: boolean }
         targets: { type: array, items: { $ref: "#/components/schemas/ContextRef" } }
-        payload: { type: object, additionalProperties: true, description: "Request body that will be applied, same shape as the corresponding endpoint" }
+        payload:
+          type: object
+          additionalProperties: true
+          description: Request body that will be applied, same shape as the corresponding endpoint
+          properties:
+            modules: { type: array, items: { type: string }, description: "create_app/modify_code: module ids installed (module engine)" }
+            addons:
+              type: array
+              description: Databases created next to the app when the action is applied (never at proposal time) and removed on revert
+              items:
+                type: object
+                properties:
+                  kind: { type: string, enum: [postgres, mongodb, redis] }
+                  env: { type: string, example: DATABASE_URL, description: Variable the app receives }
+            warnings: { type: array, items: { type: string } }
+            services: { type: array, items: { type: object, properties: { name: { type: string }, start: { type: string } } }, description: "Extra processes the app needs (for example a worker); informational" }
+        deployment:
+          type: [object, "null"]
+          description: Live state of the deployment an applied action started
+          properties:
+            id: { type: string }
+            state: { type: string }
+            serviceId: { type: string }
+            serviceName: { type: string }
+            error: { type: string }
         diff:
           type: array
           description: Human-readable before/after for the preview

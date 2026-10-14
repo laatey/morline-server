@@ -1,0 +1,10 @@
+{
+  "id": "metrics", "name": "Prometheus metrics", "category": "observability", "icon": "lucide:activity", "order": 10,
+  "summary": "GET /metrics with process and per-route request duration metrics. In production it needs METRICS_TOKEN.",
+  "label": { "add": "Adding Prometheus metrics", "remove": "Removing Prometheus metrics" },
+  "wiring": { "phase": "observability", "imports": ["import metrics from './plugins/metrics.js';"], "register": ["await app.register(metrics);"] },
+  "readme": { "features": ["- **Metrics**: Prometheus metrics at `GET /metrics` (token-protected in production)"] },
+  "env": [{ "key": "METRICS_TOKEN", "required": false, "description": "Bearer token required to read /metrics (required in production, otherwise the endpoint is not exposed)" }],
+  "deps": { "prom-client": "^15.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [{ "from": "metrics.js", "to": "src/plugins/metrics.js" }]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "swagger-docs", "name": "API docs", "category": "docs", "icon": "lucide:book-open", "order": 45,
+  "summary": "OpenAPI spec and Swagger UI at /docs, generated from your route schemas. Hidden in production unless exposeInProduction is true.",
+  "label": { "add": "Adding API docs", "remove": "Removing API docs" },
+  "options": { "exposeInProduction": { "type": "bool", "default": false, "description": "Serve /docs when NODE_ENV=production" } },
+  "wiring": { "phase": "features", "imports": ["import docs from './plugins/docs.js';"], "register": ["await app.register(docs);"] },
+  "readme": { "features": ["- **API docs**: Swagger UI at `/docs`, generated from route schemas (off in production by default)"] },
+  "deps": { "@fastify/swagger": "^9.0.0", "@fastify/swagger-ui": "^5.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [{ "from": "docs.js", "to": "src/plugins/docs.js" }]
+}

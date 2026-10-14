@@ -1,0 +1,6 @@
+{
+  "id": "http-client", "internal": true, "name": "HTTP client", "category": "internal", "icon": "lucide:globe", "order": 5,
+  "summary": "Small fetch wrapper with timeouts, retries and JSON helpers, used by provider modules.",
+  "label": { "add": "Adding HTTP client", "remove": "Removing HTTP client" },
+  "files": [{ "from": "http.js", "to": "src/lib/http.js" }]
+}

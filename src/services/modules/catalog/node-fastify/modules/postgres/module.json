@@ -1,0 +1,14 @@
+{
+  "id": "postgres", "name": "PostgreSQL", "category": "data", "icon": "postgresql", "order": 20,
+  "summary": "PostgreSQL pool as app.pg (app.pg.query(sql, params)). SQL files in migrations/ run in order at startup. Always use parameters ($1, $2).",
+  "label": { "add": "Connecting PostgreSQL", "remove": "Removing PostgreSQL" },
+  "addons": ["postgres"],
+  "wiring": { "phase": "data", "imports": ["import postgres from './plugins/postgres.js';"], "register": ["await app.register(postgres);"] },
+  "readme": { "features": ["- **PostgreSQL**: connection pool at `app.pg`; add SQL files to `migrations/` and they run automatically on startup"] },
+  "env": [
+    { "key": "DATABASE_URL", "required": true, "provisioned": true, "description": "PostgreSQL connection string (set automatically when a database is attached in Morline)" },
+    { "key": "PG_POOL_MAX", "required": false, "description": "Maximum connections in the pool (default 10)", "example": "10" }
+  ],
+  "deps": { "pg": "^8.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [{ "from": "postgres.js", "to": "src/plugins/postgres.js" }]
+}

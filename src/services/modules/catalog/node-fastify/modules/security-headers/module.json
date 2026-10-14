@@ -1,0 +1,12 @@
+{
+  "id": "security-headers", "name": "Security headers", "category": "security", "icon": "lucide:shield-check", "order": 30,
+  "summary": "Sets standard security headers (helmet): nosniff, HSTS, frame protection and a strict content policy.",
+  "label": { "add": "Adding security headers", "remove": "Removing security headers" },
+  "wiring": { "phase": "security", "imports": ["import securityHeaders from './plugins/security-headers.js';"], "register": ["await app.register(securityHeaders);"] },
+  "readme": { "features": ["- **Security headers**: helmet defaults on every response"] },
+  "deps": { "@fastify/helmet": "^13.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [
+    { "from": "security-headers.js", "to": "src/plugins/security-headers.js" },
+    { "from": "security-headers.test.js.tpl", "to": "test/security-headers.test.js" }
+  ]
+}

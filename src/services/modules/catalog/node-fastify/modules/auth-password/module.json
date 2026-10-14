@@ -1,0 +1,27 @@
+{
+  "id": "auth-password", "name": "Email and password accounts", "category": "auth", "icon": "lucide:user-round", "order": 50,
+  "summary": "Sign-up and login with email and password: POST /auth/register, POST /auth/login (return a JWT), GET /auth/me. Stores users in the connected database (option db: postgres or mongodb).",
+  "label": { "add": "Adding email and password accounts", "remove": "Removing email and password accounts" },
+  "requires": ["auth-jwt"],
+  "options": { "db": { "type": "enum", "values": ["auto", "postgres", "mongodb"], "default": "auto", "description": "Where users are stored; auto uses the connected database" } },
+  "variantBy": "db",
+  "variants": {
+    "postgres": {
+      "requires": ["postgres"],
+      "files": [
+        { "from": "users.postgres.js", "to": "src/services/users.js" },
+        { "from": "create-users.sql", "to": "migrations/0001_create_users.sql" }
+      ]
+    },
+    "mongodb": {
+      "requires": ["mongodb"],
+      "files": [{ "from": "users.mongodb.js", "to": "src/services/users.js" }]
+    }
+  },
+  "readme": { "features": ["- **Accounts**: email and password sign-up and login at `/auth/register`, `/auth/login` and `/auth/me`"] },
+  "files": [
+    { "from": "password.js", "to": "src/lib/password.js" },
+    { "from": "auth-routes.js", "to": "src/routes/auth.js" },
+    { "from": "password.test.js.tpl", "to": "test/password.test.js" }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "cors", "name": "CORS", "category": "security", "icon": "lucide:globe", "order": 31,
+  "summary": "Cross-origin access, denied by default. Allowed origins come from the CORS_ORIGINS variable.",
+  "label": { "add": "Adding CORS", "remove": "Removing CORS" },
+  "options": { "credentials": { "type": "bool", "default": false, "description": "Allow cookies and credentials on cross-origin requests" } },
+  "wiring": { "phase": "security", "imports": ["import cors from './plugins/cors.js';"], "register": ["await app.register(cors);"] },
+  "readme": { "features": ["- **CORS**: cross-origin requests are denied unless the origin is listed in `CORS_ORIGINS`"] },
+  "env": [{ "key": "CORS_ORIGINS", "required": false, "description": "Comma-separated list of allowed browser origins, for example https://app.example.com (empty denies all)" }],
+  "deps": { "@fastify/cors": "^10.0.0", "fastify-plugin": "^5.0.0" },
+  "files": [
+    { "from": "cors.js", "to": "src/plugins/cors.js" },
+    { "from": "cors.test.js.tpl", "to": "test/cors.test.js" }
+  ]
+}

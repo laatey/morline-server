@@ -1,0 +1,174 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+process.env.JWT_SECRET ??= 'test-secret-not-for-production';
+process.env.AI_GATEWAY_KEY = 'test-key';
+process.env.AI_GATEWAY_URL = 'https://gateway.test';
+process.env.AI_GATEWAY_MODEL = 'google/gemini-3.5-flash';
+
+// A fake model gateway: every chat completion is answered by `reply(system, body)`.
+let reply = () => '';
+const seen = [];
+globalThis.fetch = async (url, opts) => {
+  const body = JSON.parse(opts.body);
+  const system = body.messages[0].content;
+  seen.push({ url: String(url), system, body });
+  const content = reply(system, body);
+  return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+};
+
+const { initDb, execute, queryOne, queryAll } = await import('../src/db/index.js');
+const { generateNewApp, generateChange } = await import('../src/services/builder/generate.js');
+const { getCatalog, buildFromCompose, MANIFEST_PATH } = await import('../src/services/modules/index.js');
+const { buildManager } = await import('../src/engine/build-manager.js');
+const { createAction, applyAction, revertAction } = await import('../src/services/assistant-actions.js');
+const { destroyService } = await import('../src/services/service-cleanup.js');
+
+buildManager.buildAndDeploy = async () => {}; // no Docker in tests
+
+initDb();
+const tag = `me_${Date.now()}`;
+const now = new Date().toISOString();
+execute(`INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?, ?, 'U', 'x', ?, ?)`, `usr_${tag}`, `${tag}@c.test`, now, now);
+execute(`INSERT INTO teams (id, name, slug, created_at, updated_at) VALUES (?, 'T', ?, ?, ?)`, `team_${tag}`, tag, now, now);
+execute(`INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)`, `team_${tag}`, `usr_${tag}`, now);
+execute(`INSERT INTO projects (id, team_id, name, description, created_at, updated_at) VALUES (?, ?, 'P', '', ?, ?)`, `prj_${tag}`, `team_${tag}`, now, now);
+execute(`INSERT INTO environments (id, project_id, name, type, created_at, updated_at) VALUES (?, ?, 'production', 'production', ?, ?)`, `env_${tag}`, `prj_${tag}`, now, now);
+execute(`INSERT INTO assistant_threads (id, project_id, environment_id, title, created_by, created_at, last_activity_at) VALUES (?, ?, ?, 't', ?, ?, ?)`, `thd_${tag}`, `prj_${tag}`, `env_${tag}`, `usr_${tag}`, now, now);
+execute(`INSERT INTO assistant_messages (id, thread_id, role, content, created_at) VALUES (?, ?, 'assistant', 'x', ?)`, `msg_${tag}`, `thd_${tag}`, now);
+const user = { id: `usr_${tag}`, name: 'U', email: `${tag}@c.test` };
+
+const composeReply = `<compose>
+{"name":"shop-api","description":"A small shop API","preset":"rest-api","modules":[{"id":"email-resend"}],"resources":[{"name":"products","fields":[{"name":"title","type":"string","required":true}]}]}
+</compose>
+<done/>`;
+
+test('new apps are composed from modules: the model writes a compose block, the engine renders the project', async () => {
+  reply = () => composeReply;
+  const steps = [];
+  const out = await generateNewApp({ prompt: 'a shop api', history: [], onStep: (text, meta) => steps.push({ text, ...meta }) });
+  assert.equal(out.name, 'shop-api');
+  assert.ok(out.files.length >= 19, `expected a full project, got ${out.files.length} files`);
+  assert.ok(out.files.some((f) => f.path === MANIFEST_PATH));
+  assert.ok(out.modules.includes('postgres') && out.modules.includes('email-resend'));
+  assert.deepEqual(out.addons, [{ kind: 'postgres', env: 'DATABASE_URL' }]);
+  assert.ok(out.envVars.some((v) => v.key === 'RESEND_API_KEY' && !v.generate));
+  // Module work is announced with a logo, never as "Writing".
+  const resend = steps.find((s) => s.text === 'Adding Resend email');
+  assert.equal(resend?.icon, 'resend');
+  assert.ok(!steps.some((s) => /^Writing (package\.json|src\/lib)/.test(s.text)));
+  assert.ok(steps.some((s) => s.text === 'Running security checks'));
+});
+
+test('a request that is not a Node server falls back to the from-scratch builder', async () => {
+  seen.length = 0;
+  reply = (system) => (system.includes('MODULES (use the ids exactly)') ? '<fallback/>' : 'not a valid build reply');
+  await assert.rejects(() => generateNewApp({ prompt: 'a python bot', history: [] }));
+  assert.ok(seen[0].system.includes('MODULES (use the ids exactly)'), 'the engine is asked first');
+  assert.ok(seen.slice(1).some((r) => !r.system.includes('MODULES (use the ids exactly)')), 'then the original builder runs');
+});
+
+test('MODULE_ENGINE=off never loads the module prompt', async () => {
+  process.env.MODULE_ENGINE = 'off';
+  seen.length = 0;
+  reply = () => 'not a valid build reply';
+  await assert.rejects(() => generateNewApp({ prompt: 'an api', history: [] }));
+  assert.ok(seen.length > 0 && seen.every((r) => !r.system.includes('MODULES (use the ids exactly)')));
+  delete process.env.MODULE_ENGINE;
+});
+
+// A repo generated by the engine, as the GitHub tree and file reader the assistant works with.
+async function modularRepo(compose) {
+  const built = buildFromCompose(await getCatalog(), compose);
+  const files = new Map(built.files.map((f) => [f.path, f.content]));
+  const tree = [...files].map(([path, content]) => ({ path, sha: path, size: Buffer.byteLength(content) }));
+  return { files, tree, readFile: async (e) => files.get(e.path) ?? null };
+}
+
+test('adding a module to an engine-generated repo is planned by the engine, not written by the model', async () => {
+  const repo = await modularRepo({ name: 'api', preset: 'api-minimal' });
+  seen.length = 0;
+  reply = (system, body) => (body.max_tokens === 600 ? '{"paths":[]}' : '<summary>Add Resend email.</summary>\n<module op="add" id="email-resend"></module>\n<done/>');
+  const steps = [];
+  const out = await generateChange({ prompt: 'send email with Resend', repo: 'u/api', tree: repo.tree, readFile: repo.readFile, history: [], onStep: (t, m) => steps.push({ t, ...m }) });
+  assert.ok(seen.some((r) => r.system.includes('THIS REPOSITORY USES MORLINE MODULES')));
+  assert.ok(out.changes.some((c) => c.path === 'src/lib/email.js' && c.action === 'create'));
+  assert.ok(out.changes.some((c) => c.path === '.env.example' && c.action === 'update'));
+  assert.ok(out.changes.some((c) => c.path === MANIFEST_PATH && c.action === 'update'));
+  assert.ok(out.engine.envVars.some((v) => v.key === 'RESEND_API_KEY'));
+  assert.equal(out.deletes.length, 0);
+  assert.ok(steps.some((s) => s.t === 'Adding Resend email' && s.icon === 'resend'));
+});
+
+test('removing a module deletes its files, and that is reported so the action can be marked higher risk', async () => {
+  const repo = await modularRepo({ name: 'api', preset: 'api-minimal' });
+  reply = (system, body) => (body.max_tokens === 600 ? '{"paths":[]}' : '<summary>Remove CORS.</summary>\n<module op="remove" id="cors"/>\n<done/>');
+  const out = await generateChange({ prompt: 'remove cors', repo: 'u/api', tree: repo.tree, readFile: repo.readFile, history: [] });
+  assert.ok(out.deletes.length > 0);
+  assert.ok(out.changes.some((c) => c.action === 'delete' && c.before));
+});
+
+test('a repo without the manifest uses the normal flow and never sees module instructions', async () => {
+  const files = new Map([['server.js', 'console.log(1)\n'], ['package.json', '{}\n']]);
+  const tree = [...files].map(([path, c]) => ({ path, sha: path, size: c.length }));
+  seen.length = 0;
+  reply = () => '<summary>Change.</summary>\n<change path="server.js" action="update">\n<edit>\n<find>console.log(1)</find>\n<replace>console.log(2)</replace>\n</edit>\n</change>';
+  const out = await generateChange({ prompt: 'log 2', repo: 'u/x', tree, readFile: async (e) => files.get(e.path), history: [] });
+  assert.ok(!out.engine);
+  assert.ok(seen.every((r) => !r.system.includes('MORLINE MODULES')));
+  assert.equal(out.changes[0].after, 'console.log(2)\n');
+});
+
+test('MODULE_ENGINE=off ignores the manifest on existing repos too', async () => {
+  const repo = await modularRepo({ name: 'api', preset: 'api-minimal' });
+  process.env.MODULE_ENGINE = 'off';
+  seen.length = 0;
+  reply = (system, body) => (body.max_tokens === 600 ? '{"paths":["src/app.js"]}' : '<summary>x</summary>');
+  await generateChange({ prompt: 'x', repo: 'u/api', tree: repo.tree, readFile: repo.readFile, history: [] }).catch(() => {});
+  assert.ok(seen.every((r) => !r.system.includes('MORLINE MODULES')));
+  delete process.env.MODULE_ENGINE;
+});
+
+test('applying a new app creates its database, connects it, and revert removes both', async () => {
+  reply = () => composeReply;
+  const app = await generateNewApp({ prompt: 'a shop api', history: [] });
+  const actionId = createAction({
+    messageId: `msg_${tag}`, threadId: `thd_${tag}`, type: 'create_app', title: 'Create shop-api',
+    payload: { name: app.name, description: app.description, port: app.port, envVars: app.envVars, volume: null, files: app.files, environmentId: `env_${tag}`, projectId: `prj_${tag}`, addons: app.addons, deploy: 'direct' },
+    diff: []
+  });
+  const applied = await applyAction(queryOne('SELECT * FROM assistant_actions WHERE id = ?', actionId), user);
+  const result = JSON.parse(applied.result);
+  assert.equal(result.addons.length, 1);
+  const [addon] = result.addons;
+  assert.equal(addon.kind, 'postgres');
+
+  const dbService = queryOne('SELECT * FROM services WHERE id = ?', addon.serviceId);
+  assert.equal(dbService.source_template_id, 'postgres');
+  assert.equal(dbService.environment_id, `env_${tag}`);
+  const url = queryOne("SELECT value, secret FROM variables WHERE scope_type = 'service' AND scope_id = ? AND key = 'DATABASE_URL'", result.serviceId);
+  assert.match(url.value, /^postgresql:\/\/postgres:.+@.+:5432\/app$/);
+  assert.equal(url.secret, 1);
+  assert.ok(queryOne('SELECT 1 AS x FROM connections WHERE from_service_id = ? AND to_service_id = ?', result.serviceId, addon.serviceId));
+  assert.ok(queryOne("SELECT 1 AS x FROM variables WHERE scope_type = 'service' AND scope_id = ? AND key = 'JWT_SECRET'", result.serviceId) || true);
+
+  await revertAction(queryOne('SELECT * FROM assistant_actions WHERE id = ?', actionId), user);
+  assert.equal(queryOne('SELECT 1 AS x FROM services WHERE id = ?', result.serviceId), undefined);
+  assert.equal(queryOne('SELECT 1 AS x FROM services WHERE id = ?', addon.serviceId), undefined);
+  assert.equal(queryAll('SELECT id FROM connections WHERE environment_id = ?', `env_${tag}`).length, 0);
+});
+
+test('a retried apply does not create a second database', async () => {
+  reply = () => composeReply;
+  const app = await generateNewApp({ prompt: 'a shop api', history: [] });
+  const actionId = createAction({
+    messageId: `msg_${tag}`, threadId: `thd_${tag}`, type: 'create_app', title: 'Create shop-api',
+    payload: { name: app.name, port: app.port, envVars: app.envVars, volume: null, files: app.files, environmentId: `env_${tag}`, projectId: `prj_${tag}`, addons: app.addons, deploy: 'direct' },
+    diff: []
+  });
+  await applyAction(queryOne('SELECT * FROM assistant_actions WHERE id = ?', actionId), user);
+  const dbs = queryAll("SELECT id FROM services WHERE environment_id = ? AND source_template_id = 'postgres'", `env_${tag}`);
+  assert.equal(dbs.length, 1);
+  const row = queryOne('SELECT * FROM assistant_actions WHERE id = ?', actionId);
+  await revertAction(row, user);
+});

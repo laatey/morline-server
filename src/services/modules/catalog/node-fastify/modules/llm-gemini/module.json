@@ -1,0 +1,12 @@
+{
+  "id": "llm-gemini", "name": "Google Gemini", "category": "llm", "capability": "llm", "provider": "Google", "icon": "gemini", "order": 62,
+  "summary": "Call Gemini: import { generate } from '../lib/llm.js'; const { text } = await generate({ system, messages: [{ role: 'user', content }] }).",
+  "label": { "add": "Adding Google Gemini", "remove": "Removing Google Gemini" },
+  "requires": ["http-client"],
+  "readme": { "features": ["- **AI**: `generate()` in `src/lib/llm.js`, backed by Google Gemini"] },
+  "env": [
+    { "key": "GEMINI_API_KEY", "required": true, "description": "Gemini API key from https://aistudio.google.com/apikey" },
+    { "key": "LLM_MODEL", "required": false, "description": "Model to use (check the provider's docs for current model names)", "example": "gemini-2.5-flash" }
+  ],
+  "files": [{ "from": "llm.js", "to": "src/lib/llm.js" }]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "email-resend", "name": "Resend email", "category": "email", "capability": "email", "provider": "Resend", "icon": "resend", "order": 60,
+  "summary": "Send email with Resend: import { sendEmail } from '../lib/email.js'; await sendEmail({ to, subject, html, text }).",
+  "label": { "add": "Adding Resend email", "remove": "Removing Resend email" },
+  "requires": ["http-client"],
+  "readme": { "features": ["- **Email**: `sendEmail()` in `src/lib/email.js`, sent through Resend"] },
+  "env": [
+    { "key": "RESEND_API_KEY", "required": true, "description": "Resend API key from https://resend.com/api-keys" },
+    { "key": "EMAIL_FROM", "required": false, "description": "Default sender address (use a domain verified with your email provider)", "example": "onboarding@resend.dev" }
+  ],
+  "files": [{ "from": "email.js", "to": "src/lib/email.js" }]
+}

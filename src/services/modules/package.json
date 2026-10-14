@@ -1,0 +1,14 @@
+{
+  "name": "morline-module-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Composes production-ready server projects from a catalog of modules. Pure string-in, string-out: no network, no exec.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "icons": "node scripts/icons.js",
+    "demo": "node scripts/demo.js",
+    "conformance": "node conformance/run-presets.mjs"
+  }
+}

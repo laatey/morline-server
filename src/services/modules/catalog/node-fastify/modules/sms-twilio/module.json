@@ -1,0 +1,13 @@
+{
+  "id": "sms-twilio", "name": "Twilio SMS", "category": "sms", "capability": "sms", "provider": "Twilio", "icon": "twilio", "order": 82,
+  "summary": "Send text messages with Twilio: import { sendSms } from '../lib/sms.js'; await sendSms({ to: '+233...', body }).",
+  "label": { "add": "Adding Twilio SMS", "remove": "Removing Twilio SMS" },
+  "requires": ["http-client"],
+  "readme": { "features": ["- **SMS**: `sendSms()` in `src/lib/sms.js`, sent through Twilio"] },
+  "env": [
+    { "key": "TWILIO_ACCOUNT_SID", "required": true, "description": "Twilio Account SID" },
+    { "key": "TWILIO_AUTH_TOKEN", "required": true, "description": "Twilio Auth Token" },
+    { "key": "TWILIO_FROM", "required": true, "description": "Sender phone number in E.164 format, or a Messaging Service SID starting with MG" }
+  ],
+  "files": [{ "from": "sms.js", "to": "src/lib/sms.js" }]
+}

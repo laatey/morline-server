@@ -1,0 +1,32 @@
+{
+  "runtime": "node-fastify",
+  "label": "Node.js 22 with Fastify",
+  "phases": ["observability", "data", "security", "features", "core"],
+  "addons": {
+    "postgres": "DATABASE_URL",
+    "mongodb": "MONGODB_URL",
+    "redis": "REDIS_URL"
+  },
+  "presets": {
+    "api-minimal": {
+      "description": "A small hardened HTTP API: security headers, CORS (deny by default) and rate limiting.",
+      "modules": ["security-headers", "cors", "rate-limit"]
+    },
+    "rest-api": {
+      "description": "Hardened REST API with PostgreSQL and generated OpenAPI docs.",
+      "modules": ["security-headers", "cors", "rate-limit", "postgres", "swagger-docs"]
+    },
+    "saas-backend": {
+      "description": "Accounts, login and a database: JWT auth with email and password, PostgreSQL, Redis-backed rate limiting.",
+      "modules": ["security-headers", "cors", { "id": "rate-limit", "options": { "store": "redis" } }, "postgres", "redis", "auth-jwt", "auth-password", "swagger-docs"]
+    },
+    "webhook-receiver": {
+      "description": "Receives webhooks from other services: security headers and rate limiting only.",
+      "modules": ["security-headers", "rate-limit"]
+    },
+    "worker": {
+      "description": "Background jobs: Redis queue with a separate worker process, plus scheduled jobs.",
+      "modules": ["redis", "queue", "scheduler"]
+    }
+  }
+}

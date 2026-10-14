@@ -1,0 +1,56 @@
+{
+  "id": "payments-paystack",
+  "name": "Paystack payments",
+  "category": "payments",
+  "provider": "Paystack",
+  "icon": "paystack",
+  "order": 71,
+  "summary": "Paystack: initializeTransaction() and verifyTransaction() in src/lib/paystack.js (amounts in smallest currency unit); verified webhook at POST /webhooks/paystack calls handlePaystackEvent().",
+  "label": {
+    "add": "Adding Paystack payments",
+    "remove": "Removing Paystack payments"
+  },
+  "requires": [
+    "http-client"
+  ],
+  "wiring": {
+    "phase": "features",
+    "imports": [
+      "import paystackWebhook from './plugins/paystack-webhook.js';"
+    ],
+    "register": [
+      "await app.register(paystackWebhook);"
+    ]
+  },
+  "readme": {
+    "features": [
+      "- **Paystack**: transactions in `src/lib/paystack.js` and a signature-verified webhook at `POST /webhooks/paystack`"
+    ]
+  },
+  "env": [
+    {
+      "key": "PAYSTACK_SECRET_KEY",
+      "required": true,
+      "description": "Paystack secret key (starts with sk_), also used to verify webhook signatures"
+    }
+  ],
+  "files": [
+    {
+      "from": "paystack.js",
+      "to": "src/lib/paystack.js"
+    },
+    {
+      "from": "paystack-webhook.js",
+      "to": "src/plugins/paystack-webhook.js"
+    },
+    {
+      "from": "paystack-events.js",
+      "to": "src/services/paystack-events.js",
+      "userOwned": true
+    },
+    {
+      "from": "paystack.test.js.tpl",
+      "to": "test/paystack.test.js"
+    }
+  ]
+}

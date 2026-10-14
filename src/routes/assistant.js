@@ -10,6 +10,7 @@ import { classifyIntent, generateNewApp, generateChange } from '../services/buil
 import { describeChanges } from '../services/builder/diff.js';
 import { GitHubError, withGithub, getRepo, getBranchHead, listFiles, getBlobText } from '../services/github-repo.js';
 import { listWorkspaceFiles, readWorkspaceFile } from '../services/service-factory.js';
+import { getCatalog } from '../services/modules/index.js';
 import { collectLogs } from '../engine/diagnosis-manager.js';
 import { createAction, publicAction, applyAction, revertAction, dismissAction, githubConnected } from '../services/assistant-actions.js';
 
@@ -374,6 +375,15 @@ const firstSentence = (text, max = 72) => {
   return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
 };
 
+const ADDON_LABEL = { postgres: 'PostgreSQL', mongodb: 'MongoDB', redis: 'Redis' };
+const listWords = (items) => (items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
+/** Names for module ids as they read in a sentence. The progress label already has the right casing ("Adding rate limiting"). */
+async function moduleNames(ids) {
+  const catalog = await getCatalog();
+  return ids.map((id) => catalog.modules.get(id)).filter((d) => d && !d.internal)
+    .map((d) => String(d.label?.add || d.name).replace(/^(Adding|Connecting|Enabling|Generating)\s+/i, ''));
+}
+
 async function proposeNewApp({ thread, team, userContent, history, progress }) {
   const environmentId = thread.environment_id
     || queryOne('SELECT id FROM environments WHERE project_id = ? ORDER BY created_at ASC LIMIT 1', thread.project_id)?.id;
@@ -382,9 +392,14 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
   const app = await generateNewApp({ prompt: userContent, history, onStep: progress });
   const diff = describeChanges(app.files.map((f) => ({ path: f.path, action: 'create', before: '', after: f.content })));
   const extra = app.envVars.filter((v) => !v.generate);
+  const addons = app.addons || [];
   const text = [
     `I wrote **${app.name}**${app.description ? `: ${app.description}` : '.'}`,
     app.notes,
+    app.modules?.length ? `Includes ${listWords(await moduleNames(app.modules))}.` : '',
+    addons.length ? `Applying it also creates ${listWords(addons.map((a) => `a ${ADDON_LABEL[a.kind] || a.kind} database`))} and connects it as ${listWords(addons.map((a) => `\`${a.env}\``))}.` : '',
+    app.services?.length ? `It also needs ${listWords(app.services.map((s) => `a \`${s.name}\` process (\`${s.start}\`)`))}, which you add as a second service.` : '',
+    app.warnings?.length ? `Heads up:\n${app.warnings.map((w) => `- ${w}`).join('\n')}` : '',
     `Applying this deploys ${app.files.length} files as a new service${app.volume ? ` with a ${app.volume.sizeGb} GB volume at \`${app.volume.mountPath}\`` : ''}. You can deploy straight away, or also save the code to a new private GitHub repository.`
       + (app.envVars.some((v) => v.generate) ? ` Secrets such as ${app.envVars.filter((v) => v.generate).map((v) => `\`${v.key}\``).join(', ')} are generated for you.` : ''),
     extra.length ? `You will need to set: ${extra.map((v) => `\`${v.key}\`${v.description ? ` (${v.description})` : ''}`).join(', ')}.` : ''
@@ -399,7 +414,13 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
       risk: 'medium',
       reversible: true,
       targets: [{ type: 'environment', id: environmentId }],
-      payload: { name: app.name, description: app.description, port: app.port, envVars: app.envVars, volume: app.volume, files: app.files, environmentId, projectId: thread.project_id },
+      payload: {
+        name: app.name, description: app.description, port: app.port, envVars: app.envVars, volume: app.volume, files: app.files, environmentId, projectId: thread.project_id,
+        ...(app.modules ? { modules: app.modules } : {}),
+        ...(addons.length ? { addons } : {}),
+        ...(app.warnings?.length ? { warnings: app.warnings } : {}),
+        ...(app.services?.length ? { services: app.services } : {})
+      },
       diff
     }]
   };
@@ -449,17 +470,26 @@ async function proposeCodeChange({ thread, team, route, userContent, history, pr
   if (!out.changes.length) return { text: out.summary || 'I could not find a change to make for that. Tell me more about what you want.' };
 
   const message = firstSentence(out.summary) || 'Update from the Morline assistant';
+  const engine = out.engine || null;
+  const removesFiles = (out.deletes || []).length > 0;
   const where = local ? `\`${service.name}\`` : `\`${branch}\` of \`${repo}\``;
   return {
-    text: `${stripPermissionAsks(out.summary)}\n\nReview the diff below. Applying it ${local ? 'updates the files of' : `commits to ${where} and redeploys`}${local ? ` **${service.name}** and redeploys it` : ` **${service.name}**, or you can open a pull request instead`}.`,
+    text: `${stripPermissionAsks(out.summary)}${engine?.addons?.length ? `\n\nApplying it also creates ${listWords(engine.addons.map((a) => `a ${ADDON_LABEL[a.kind] || a.kind} database`))} and connects it as ${listWords(engine.addons.map((a) => `\`${a.env}\``))}.` : ''}${engine?.envVars?.some((v) => !v.generate) ? `\n\nYou will need to set: ${engine.envVars.filter((v) => !v.generate).map((v) => `\`${v.key}\``).join(', ')}.` : ''}${engine?.warnings?.length ? `\n\nHeads up:\n${engine.warnings.map((w) => `- ${w}`).join('\n')}` : ''}${removesFiles ? `\n\nThis removes ${out.deletes.length} file${out.deletes.length === 1 ? '' : 's'}: ${out.deletes.slice(0, 6).map((d) => `\`${d}\``).join(', ')}${out.deletes.length > 6 ? ', and more' : ''}.` : ''}\n\nReview the diff below. Applying it ${local ? 'updates the files of' : `commits to ${where} and redeploys`}${local ? ` **${service.name}** and redeploys it` : ` **${service.name}**, or you can open a pull request instead`}.`,
     actions: [{
       type: 'modify_code',
       title: message,
       description: `${out.changes.length} file${out.changes.length === 1 ? '' : 's'} in ${repo || service.name}`,
-      risk: 'medium',
+      // Deleting files (removing a module deletes its code) is a bigger step, so it always needs a click.
+      risk: removesFiles ? 'high' : 'medium',
       reversible: true,
       targets: [{ type: 'service', id: service.id, label: service.name }],
-      payload: { serviceId: service.id, repo, branch, baseSha, mode: 'commit', local, message, summary: out.summary, changes: out.changes },
+      payload: {
+        serviceId: service.id, repo, branch, baseSha, mode: 'commit', local, message, summary: out.summary, changes: out.changes,
+        ...(engine?.addons?.length ? { addons: engine.addons } : {}),
+        ...(engine?.envVars?.length ? { envVars: engine.envVars } : {}),
+        ...(engine?.warnings?.length ? { warnings: engine.warnings } : {}),
+        ...(engine?.modules ? { modules: engine.modules } : {})
+      },
       diff: describeChanges(out.changes)
     }]
   };
@@ -664,7 +694,13 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     try {
       outcome = await respond({
         thread, user: req.user, userContent, context, history,
-        progress: (text) => { if (text && steps[steps.length - 1] !== text) steps.push(text); send('status', { text }); }
+        // Steps are plain strings, or { text, icon } when the module engine names a logo to show.
+        progress: (text, meta) => {
+          const textOf = (st) => (typeof st === 'string' ? st : st.text);
+          if (!text || (steps.length && textOf(steps[steps.length - 1]) === text)) return;
+          steps.push(meta?.icon ? { text, icon: meta.icon } : text);
+          send('status', meta?.icon ? { text, icon: meta.icon } : { text });
+        }
       });
     } catch (err) {
       console.error('[Assistant]', err);

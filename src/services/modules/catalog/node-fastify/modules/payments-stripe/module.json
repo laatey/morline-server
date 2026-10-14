@@ -1,0 +1,19 @@
+{
+  "id": "payments-stripe", "name": "Stripe payments", "category": "payments", "provider": "Stripe", "icon": "stripe", "order": 70,
+  "summary": "Stripe Checkout and webhooks: createCheckoutSession() in src/lib/stripe.js; signed webhook at POST /webhooks/stripe calls handleStripeEvent() in src/services/stripe-events.js.",
+  "label": { "add": "Adding Stripe payments", "remove": "Removing Stripe payments" },
+  "requires": ["http-client"],
+  "wiring": { "phase": "features", "imports": ["import stripeWebhook from './plugins/stripe-webhook.js';"], "register": ["await app.register(stripeWebhook);"] },
+  "readme": { "features": ["- **Stripe**: Checkout sessions in `src/lib/stripe.js` and a signature-verified webhook at `POST /webhooks/stripe`"] },
+  "env": [
+    { "key": "STRIPE_SECRET_KEY", "required": true, "description": "Stripe secret key (starts with sk_)" },
+    { "key": "STRIPE_WEBHOOK_SECRET", "required": true, "description": "Signing secret of the Stripe webhook endpoint (starts with whsec_)" }
+  ],
+  "deps": {},
+  "files": [
+    { "from": "stripe.js", "to": "src/lib/stripe.js" },
+    { "from": "stripe-webhook.js", "to": "src/plugins/stripe-webhook.js" },
+    { "from": "stripe-events.js", "to": "src/services/stripe-events.js", "userOwned": true },
+    { "from": "stripe.test.js.tpl", "to": "test/stripe.test.js" }
+  ]
+}
