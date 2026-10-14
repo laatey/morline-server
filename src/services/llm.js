@@ -1,7 +1,7 @@
 import {
   OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
   GEMINI_API_KEY, ANTHROPIC_API_KEY,
-  AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL
+  AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL, AI_GATEWAY_FAST_MODEL
 } from '../config.js';
 
 const TIMEOUT_MS = 180_000;
@@ -67,12 +67,19 @@ async function chatCompletions(baseUrl, key, model, system, messages, { maxToken
   return { text, truncated };
 }
 
-async function anthropic(system, messages, { maxTokens, temperature, onText }) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+/** Anthropic Messages format. `target` points it at the gateway's /messages route instead of api.anthropic.com. */
+async function anthropic(system, messages, { maxTokens, temperature, onText }, target = {}) {
+  const key = target.key || ANTHROPIC_API_KEY;
+  const res = await fetch(target.url || 'https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      ...(target.url ? { Authorization: `Bearer ${key}` } : {}),
+      'anthropic-version': '2023-06-01'
+    },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
+      model: target.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
       system,
       messages,
       temperature,
@@ -105,11 +112,15 @@ async function anthropic(system, messages, { maxTokens, temperature, onText }) {
  * order (gateway, Anthropic, OpenAI, Gemini); the first one that answers wins.
  * `messages` is a list of `{ role: 'user' | 'assistant', content }`.
  */
-export async function completeDetailed({ system, messages, maxTokens = 4096, temperature = 0.2, onText }) {
+export async function completeDetailed({ system, messages, maxTokens = 4096, temperature = 0.2, onText, fast = false }) {
   const opts = { maxTokens, temperature, onText };
   const providers = [];
   if (AI_GATEWAY_KEY) {
-    providers.push(['gateway', () => chatCompletions(AI_GATEWAY_URL, AI_GATEWAY_KEY, AI_GATEWAY_MODEL || 'google/gemini-2.5-flash', system, messages, opts)]);
+    const model = (fast && AI_GATEWAY_FAST_MODEL) || AI_GATEWAY_MODEL || 'google/gemini-2.5-flash';
+    // The gateway serves Claude on /messages (Anthropic format) and everything else on /chat/completions.
+    providers.push(['gateway', () => model.startsWith('anthropic/')
+      ? anthropic(system, messages, opts, { url: `${AI_GATEWAY_URL}/messages`, key: AI_GATEWAY_KEY, model })
+      : chatCompletions(AI_GATEWAY_URL, AI_GATEWAY_KEY, model, system, messages, opts)]);
   }
   if (ANTHROPIC_API_KEY) providers.push(['anthropic', () => anthropic(system, messages, opts)]);
   if (OPENAI_API_KEY) {
@@ -156,8 +167,7 @@ export async function completeLong({ system, messages, maxTokens = 16000, temper
       onText: onText ? (delta) => onText(delta, prefix + delta) : undefined
     });
     text += part.text;
-    if (!part.truncated && isComplete(text)) return text;
-    if (!part.truncated && round > 0) return text; // the model finished; trust it rather than looping
+    if (!part.truncated) return text; // the model finished (cleanly or not); asking it to "continue" would only confuse it
   }
   return text;
 }
@@ -183,8 +193,8 @@ export function extractJson(text) {
 }
 
 /** Completion that must come back as a JSON object. Retries once, telling the model what was wrong. */
-export async function completeJson({ system, messages, maxTokens = 16000, temperature = 0.2 }) {
-  const first = await complete({ system, messages, maxTokens, temperature });
+export async function completeJson({ system, messages, maxTokens = 16000, temperature = 0.2, fast = false }) {
+  const first = await complete({ system, messages, maxTokens, temperature, fast });
   try {
     return extractJson(first);
   } catch (err) {
@@ -192,7 +202,8 @@ export async function completeJson({ system, messages, maxTokens = 16000, temper
       system,
       messages: [...messages, { role: 'assistant', content: first.slice(0, 4000) }, { role: 'user', content: `That was not valid JSON (${err.message}). Reply again with only the JSON object, nothing else.` }],
       maxTokens,
-      temperature: 0
+      temperature: 0,
+      fast
     });
     return extractJson(retry);
   }

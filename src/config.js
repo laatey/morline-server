@@ -78,6 +78,8 @@ export const GITHUB_PRIVATE_KEY = loadGitHubPrivateKey();
 export const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || 'https://key-keeper-proxy.lovable.app/api/public/ai';
 export const AI_GATEWAY_KEY = process.env.AI_GATEWAY_KEY || null;
 export const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || 'google/gemini-2.5-flash';
+// Optional cheaper model for small jobs (routing a message, naming a chat). Falls back to AI_GATEWAY_MODEL.
+export const AI_GATEWAY_FAST_MODEL = process.env.AI_GATEWAY_FAST_MODEL || null;
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';

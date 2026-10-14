@@ -98,7 +98,7 @@ export function dismissDiagnosis(deploymentId) {
 
 const LOG_NOISE = /^\[Container build\] #\d+ (sha256:|extracting|exporting|resolve |DONE|CACHED|\.\.\.|transferring|\[internal\]|load )/;
 
-function collectLogs(deploymentId) {
+export function collectLogs(deploymentId) {
   const tail = queryAll('SELECT id, level, phase, message, timestamp FROM deployment_logs WHERE deployment_id = ? ORDER BY timestamp DESC LIMIT 150', deploymentId);
   const problems = queryAll("SELECT id, level, phase, message, timestamp FROM deployment_logs WHERE deployment_id = ? AND level IN ('error', 'warn') ORDER BY timestamp DESC LIMIT 80", deploymentId);
   const byId = new Map();

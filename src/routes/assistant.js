@@ -9,6 +9,8 @@ import { complete, llmConfigured } from '../services/llm.js';
 import { classifyIntent, generateNewApp, generateChange } from '../services/builder/generate.js';
 import { describeChanges } from '../services/builder/diff.js';
 import { GitHubError, withGithub, getRepo, getBranchHead, listFiles, getBlobText } from '../services/github-repo.js';
+import { listWorkspaceFiles, readWorkspaceFile } from '../services/service-factory.js';
+import { collectLogs } from '../engine/diagnosis-manager.js';
 import { createAction, publicAction, applyAction, revertAction, dismissAction, githubConnected } from '../services/assistant-actions.js';
 
 const router = Router();
@@ -93,7 +95,7 @@ router.get('/projects/:projectId/assistant/suggestions', (req, res) => {
 });
 
 // Helper to get threads for a query
-function queryThreads(whereClause, params) {
+function queryThreads(whereClause, params, { messageLimit = 30 } = {}) {
   const rows = queryAll(`
     SELECT t.*, e.name as environment_name
     FROM assistant_threads t
@@ -107,8 +109,10 @@ function queryThreads(whereClause, params) {
     const counts = getThreadCounts(r.id);
     const mapped = mapThread(r, mapUserRef(user), counts);
     // Include messages array for frontend direct consumption
-    const msgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at ASC', r.id);
+    // Newest messages only; older ones are fetched as the user scrolls back up.
+    const msgs = queryAll('SELECT * FROM assistant_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?', r.id, messageLimit).reverse();
     mapped.messages = msgs.map(mapMessageFull);
+    mapped.hasMoreMessages = counts.messageCount > msgs.length;
     return mapped;
   });
 }
@@ -401,47 +405,88 @@ async function proposeNewApp({ thread, team, userContent, history, progress }) {
   };
 }
 
-async function proposeCodeChange({ thread, team, route, userContent, history, progress }) {
+async function proposeCodeChange({ thread, team, route, userContent, history, progress, displayPrompt }) {
   const services = projectServices(thread.project_id);
   const service = services.find((s) => s.id === route.serviceId);
+  const editable = (s) => (s.source_type === 'github' && s.source_repo) || s.source_type === 'local';
   if (!service) {
-    const options = services.filter((s) => s.source_type === 'github' && s.source_repo).map((s) => s.name);
-    return { text: options.length ? `Which service should I change? It needs to deploy from GitHub: ${options.join(', ')}.` : 'I can only change code for services that deploy from a GitHub repository, and this project has none yet.' };
+    const options = services.filter(editable).map((s) => s.name);
+    return { text: options.length ? `Which service should I change? It needs to be an app I generated or one that deploys from GitHub: ${options.join(', ')}.` : 'I can only change code for apps I generated or services that deploy from a GitHub repository, and this project has none yet.' };
   }
-  if (service.source_type !== 'github' || !service.source_repo) {
+  if (!editable(service)) {
     return { text: `**${service.name}** doesn't deploy from a GitHub repository, so there is no source code I can edit. I can still build a new app for you, or help configure it.` };
   }
-  if (!githubConnected(team.team_id)) {
-    return { text: 'Connect GitHub first (Settings, Integrations) so I can read and write this repository.' };
+
+  // Where the code lives: a GitHub repo, or the service's own build workspace.
+  let repo = service.source_repo;
+  let branch;
+  let baseSha;
+  let tree;
+  let readFile;
+  const local = service.source_type === 'local';
+  if (local) {
+    repo = null;
+    branch = 'local';
+    baseSha = 'local';
+    progress(`Reading ${service.name}`);
+    tree = listWorkspaceFiles(service.id);
+    readFile = async (entry) => readWorkspaceFile(service.id, entry.path);
+  } else {
+    if (!githubConnected(team.team_id)) {
+      return { text: 'Connect GitHub first (Settings, Integrations) so I can read and write this repository.' };
+    }
+    progress(`Reading ${repo}`);
+    const settings = queryOne('SELECT branch FROM service_settings WHERE service_id = ?', service.id);
+    ({ branch, baseSha, tree, readFile } = await withGithub(team.team_id, repo, async (t) => {
+      const branch = settings?.branch || service.source_branch || (await getRepo(t, repo)).default_branch;
+      const baseSha = await getBranchHead(t, repo, branch);
+      const tree = await listFiles(t, repo, baseSha);
+      return { branch, baseSha, tree, readFile: (entry) => getBlobText(t, repo, entry.sha) };
+    }));
   }
 
-  const repo = service.source_repo;
-  progress(`Reading ${repo}`);
-  const settings = queryOne('SELECT branch FROM service_settings WHERE service_id = ?', service.id);
-  const { branch, baseSha, tree, readFile } = await withGithub(team.team_id, repo, async (t) => {
-    const branch = settings?.branch || service.source_branch || (await getRepo(t, repo)).default_branch;
-    const baseSha = await getBranchHead(t, repo, branch);
-    const tree = await listFiles(t, repo, baseSha);
-    return { branch, baseSha, tree, readFile: (entry) => getBlobText(t, repo, entry.sha) };
-  });
-
-  const out = await generateChange({ prompt: userContent, repo, tree, readFile, history, onStep: progress });
+  const out = await generateChange({ prompt: userContent, repo: repo || service.name, tree, readFile, history, onStep: progress });
   if (!out.changes.length) return { text: out.summary || 'I could not find a change to make for that. Tell me more about what you want.' };
 
   const message = firstSentence(out.summary) || 'Update from the Morline assistant';
+  const where = local ? `\`${service.name}\`` : `\`${branch}\` of \`${repo}\``;
   return {
-    text: `${out.summary}\n\nReview the diff below. Applying it commits to \`${branch}\` of \`${repo}\` and redeploys **${service.name}**, or you can open a pull request instead.`,
+    text: `${out.summary}\n\nReview the diff below. Applying it ${local ? 'updates the files of' : `commits to ${where} and redeploys`}${local ? ` **${service.name}** and redeploys it` : ` **${service.name}**, or you can open a pull request instead`}.`,
     actions: [{
       type: 'modify_code',
       title: message,
-      description: `${out.changes.length} file${out.changes.length === 1 ? '' : 's'} in ${repo}`,
+      description: `${out.changes.length} file${out.changes.length === 1 ? '' : 's'} in ${repo || service.name}`,
       risk: 'medium',
       reversible: true,
       targets: [{ type: 'service', id: service.id, label: service.name }],
-      payload: { serviceId: service.id, repo, branch, baseSha, mode: 'commit', message, summary: out.summary, changes: out.changes },
+      payload: { serviceId: service.id, repo, branch, baseSha, mode: 'commit', local, message, summary: out.summary, changes: out.changes },
       diff: describeChanges(out.changes)
     }]
   };
+}
+
+/** "Fix and deploy": read the failed deployment's logs and propose a code change that fixes it. */
+async function proposeFix({ thread, team, deploymentId, userContent, history, progress }) {
+  const dep = queryOne(`
+    SELECT d.*, e.project_id FROM deployments d
+    JOIN services s ON s.id = d.service_id
+    JOIN environments e ON e.id = s.environment_id
+    WHERE d.id = ?
+  `, deploymentId);
+  if (!dep || dep.project_id !== thread.project_id) return { text: 'I could not find that deployment in this project.' };
+
+  progress(`Reading the logs of ${dep.service_name}`);
+  const logs = collectLogs(deploymentId);
+  const prompt = [
+    `The latest deployment of "${dep.service_name}" ${dep.state === 'crashed' ? 'crashed' : 'failed'}. Find the root cause and fix it in the code, the Dockerfile or the configuration files, so the next deploy succeeds.`,
+    dep.error_summary ? `Recorded error: ${String(dep.error_summary).slice(0, 800)}` : '',
+    `The log below may be missing the underlying error line. If it is, work it out from the files: check the Dockerfile step order (a file must be copied before a command uses it), install lifecycle scripts such as postinstall, devDependencies that are omitted in production, and start commands.`,
+    `Deployment logs:\n${logs || '(no logs were captured)'}`,
+    userContent && !/^fix (and|&) deploy/i.test(userContent) ? `The user also said: ${userContent}` : ''
+  ].filter(Boolean).join('\n\n');
+
+  const out = await proposeCodeChange({ thread, team, route: { serviceId: dep.service_id }, userContent: prompt, history, progress });
+  return out;
 }
 
 async function respond({ thread, user, userContent, context, history, progress }) {
@@ -449,7 +494,18 @@ async function respond({ thread, user, userContent, context, history, progress }
 
   const team = queryOne('SELECT team_id FROM projects WHERE id = ?', thread.project_id);
   const services = projectServices(thread.project_id);
-  const preferred = (Array.isArray(context) ? context : []).find((c) => c?.type === 'service')?.id || null;
+  const ctxList = Array.isArray(context) ? context : (context ? [context] : []);
+  const preferred = ctxList.find((c) => c?.type === 'service')?.id || null;
+  const failedDeployment = ctxList.find((c) => c?.type === 'deployment' && c.deploymentId);
+  const wantsFix = failedDeployment && /\b(fix|repair|resolve|patch)\b/i.test(userContent);
+  if (team && wantsFix) {
+    try {
+      return await proposeFix({ thread, team, deploymentId: failedDeployment.deploymentId, userContent, history, progress });
+    } catch (err) {
+      console.error('[Assistant] fix failed:', err.message);
+      return { text: `I couldn't work out a fix: ${err.message.replace(/\.$/, '')}.` };
+    }
+  }
 
   let route = { intent: 'answer', serviceId: preferred };
   try {

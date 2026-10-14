@@ -48,7 +48,9 @@ export function parseChangeOutput(raw) {
     changes.push(change);
   }
   const opened = count(text, /<change\s+path="/g);
-  return { summary, changes, complete: Boolean(summary) && opened === changes.length };
+  // A well-formed set of changes is usable even if the model forgot the <summary> line.
+  const complete = opened === changes.length && (changes.length > 0 || Boolean(summary));
+  return { summary: summary || (changes.length ? `Update ${changes.map((c) => c.path).join(', ')}` : ''), changes, complete };
 }
 
 /**

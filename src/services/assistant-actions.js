@@ -4,7 +4,7 @@ import { execute, queryOne } from '../db/index.js';
 import { mapAction } from '../db/mappers.js';
 import { AppError, forbidden, notFound } from '../middleware/error-handler.js';
 import { GitHubError, withGithub, createRepoForTeam, getRepo, getBranchHead, commitFiles, createBranch, createPullRequest } from './github-repo.js';
-import { createRepoService, startDeployment, writeWorkspaceFiles } from './service-factory.js';
+import { createRepoService, startDeployment, writeWorkspaceFiles, applyWorkspaceChanges } from './service-factory.js';
 import { slugify } from './builder/files.js';
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
@@ -29,8 +29,15 @@ export function publicAction(row) {
   action.payload = {
     repo: p.repo, branch: p.branch, mode: p.mode, serviceId: p.serviceId, name: p.name, port: p.port,
     envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length,
+    local: p.local || undefined,
     deploy: p.deploy, githubConnected: row.type === 'create_app' ? githubConnected(teamOf(row)?.team_id) : undefined
   };
+  // Live state of the deployment this action started, so the chat can show Deploying / Live / Failed.
+  const depId = action.result?.revertDeploymentId || action.result?.deploymentId;
+  if (depId) {
+    const d = queryOne('SELECT id, state, service_id, service_name, error_summary FROM deployments WHERE id = ?', depId);
+    action.deployment = d ? { id: d.id, state: d.state, serviceId: d.service_id, serviceName: d.service_name, error: (d.error_summary || '').slice(0, 300) } : null;
+  }
   return action;
 }
 
@@ -175,6 +182,14 @@ async function runModifyCode(row, user, team) {
   const result = parse(row.result, {}) || {};
   const message = `${p.message}\n\nProposed by the Morline assistant, applied by ${user.name || user.email}`;
 
+  if (p.local) {
+    // A service deployed without GitHub: the files live in its build workspace.
+    applyWorkspaceChanges(p.serviceId, toCommitChanges(p.changes));
+    const next = { ...result, localApplied: true };
+    next.deploymentId = startDeployment({ serviceId: p.serviceId, userId: user.id, message: p.message });
+    return next;
+  }
+
   if (p.mode === 'pr') {
     const branch = `morline/${slugify(p.message, 'change').slice(0, 30)}-${row.id.slice(-6)}`;
     const out = await withGithub(team.team_id, p.repo, async (t) => {
@@ -204,6 +219,14 @@ async function revertModifyCode(row, user, team) {
   const p = parse(row.payload, {});
   const result = parse(row.result, {}) || {};
   if (p.mode === 'pr') throw new AppError('Close the pull request on GitHub to undo this', 409, 'action_not_reversible');
+  if (p.local) {
+    applyWorkspaceChanges(p.serviceId, p.changes.map((c) => c.action === 'create'
+      ? { path: c.path, action: 'delete' }
+      : { path: c.path, action: 'update', content: c.before }));
+    const next = { ...result, localReverted: true };
+    next.revertDeploymentId = startDeployment({ serviceId: p.serviceId, userId: user.id, message: `Revert: ${p.message}` });
+    return next;
+  }
   const undo = p.changes.map((c) => c.action === 'create'
     ? { path: c.path, action: 'delete' }
     : { path: c.path, action: c.action === 'delete' ? 'create' : 'update', content: c.before });

@@ -82,3 +82,44 @@ export function writeWorkspaceFiles(serviceId, files) {
     fs.writeFileSync(target, f.content, 'utf8');
   }
 }
+
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', '.venv', 'target']);
+
+/** Every readable file in a service's build workspace, as `{ path, sha, size }` (sha is unused locally). */
+export function listWorkspaceFiles(serviceId) {
+  const root = path.resolve(buildManager.getWorkspaceDir(serviceId));
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
+      } else if (entry.isFile()) {
+        const abs = path.join(dir, entry.name);
+        out.push({ path: path.relative(root, abs).split(path.sep).join('/'), sha: null, size: fs.statSync(abs).size });
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** File text from the workspace, or null when it is missing or binary. */
+export function readWorkspaceFile(serviceId, rel) {
+  const root = path.resolve(buildManager.getWorkspaceDir(serviceId));
+  const abs = path.resolve(root, rel);
+  if (!abs.startsWith(root + path.sep) || !fs.existsSync(abs)) return null;
+  const buf = fs.readFileSync(abs);
+  return buf.includes(0) ? null : buf.toString('utf8');
+}
+
+/** Apply `[{ path, action, content }]` to the workspace. */
+export function applyWorkspaceChanges(serviceId, changes) {
+  const root = path.resolve(buildManager.getWorkspaceDir(serviceId));
+  for (const c of changes) {
+    const abs = path.resolve(root, c.path);
+    if (!abs.startsWith(root + path.sep)) throw new Error(`Refusing to write outside the workspace: ${c.path}`);
+    if (c.action === 'delete') { fs.rmSync(abs, { force: true }); continue; }
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, c.content, 'utf8');
+  }
+}

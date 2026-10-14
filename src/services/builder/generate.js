@@ -27,7 +27,8 @@ export async function classifyIntent({ message, services, history, preferredServ
       { role: 'user', content: `Services in this project: ${JSON.stringify(list)}\n${preferredServiceId ? `The user has this service selected: ${preferredServiceId}\n` : ''}\nMessage: ${message}` }
     ],
     maxTokens: 300,
-    temperature: 0
+    temperature: 0,
+    fast: true
   });
   const intent = ['build_app', 'change_code'].includes(out.intent) ? out.intent : 'answer';
   const serviceId = services.some((s) => s.id === out.serviceId) ? out.serviceId : (preferredServiceId || null);
@@ -188,8 +189,20 @@ export async function generateChange({ prompt, repo, tree, readFile, history, on
       onText: (_d, soFar) => report(soFar),
       isComplete: (t) => parseChangeOutput(t).complete
     });
-    const out = parseChangeOutput(text);
-    if (!out.complete) throw new Error('The model\'s reply was cut off before the change was finished. Try a smaller change.');
+    let out = parseChangeOutput(text);
+    if (!out.complete) {
+      // The model answered in prose or left a block open. Show it the format once more.
+      const retry = await completeLong({
+        system: CHANGE_SYSTEM,
+        messages: [...messages, { role: 'assistant', content: text.slice(0, 6000) }, { role: 'user', content: 'That did not follow the required format. Reply again with ONLY a <summary> and the <change> blocks described in the instructions, with every tag closed.' }],
+        maxTokens: 16000, temperature: 0,
+        onText: (_d, soFar) => report(soFar),
+        isComplete: (t) => parseChangeOutput(t).complete
+      });
+      out = parseChangeOutput(retry);
+      if (!out.complete) throw new Error('The model could not produce a valid change for that. Rephrase the request, or name the file you want changed.');
+      return { text: retry, out };
+    }
     return { text, out };
   };
 
