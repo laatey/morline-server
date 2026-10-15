@@ -41,7 +41,7 @@ function streamReporter(catalog, emit) {
             if (def && !def.internal) emit(def.label.add, { icon: def.icon, module: id, op: 'add' });
           }
           for (const r of compose.resources) {
-            if (r?.name) emit(`Generating ${String(r.name).charAt(0).toUpperCase()}${String(r.name).slice(1)} API`, { icon: 'lucide:database', module: `resource:${r.name}`, op: 'add' });
+            if (r?.name) emit(`Generating ${String(r.name).charAt(0).toUpperCase()}${String(r.name).slice(1)} API`, { icon: null, module: `resource:${r.name}`, op: 'add' });
           }
         } catch { /* the final parse reports any real problem */ }
       }

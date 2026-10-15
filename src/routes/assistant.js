@@ -11,6 +11,7 @@ import { describeChanges } from '../services/builder/diff.js';
 import { GitHubError, withGithub, getRepo, getBranchHead, listFiles, getBlobText } from '../services/github-repo.js';
 import { listWorkspaceFiles, readWorkspaceFile } from '../services/service-factory.js';
 import { getCatalog } from '../services/modules/index.js';
+import { describeOp, normalizeOp } from '../services/platform-ops.js';
 import { collectLogs } from '../engine/diagnosis-manager.js';
 import { createAction, publicAction, applyAction, revertAction, dismissAction, githubConnected } from '../services/assistant-actions.js';
 
@@ -328,6 +329,28 @@ function projectServices(projectId) {
   `, projectId);
 }
 
+const IMAGE_RE = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/;
+
+/** Validate pasted or attached images: at most 4, each under 6 MB. Returns [{ dataUrl, mediaType, data }]. */
+function parseImages(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 4).map((u) => {
+    const m = typeof u === 'string' && u.length < 8_000_000 ? IMAGE_RE.exec(u) : null;
+    if (!m) throw validationError('Images must be PNG, JPEG, WebP or GIF under 6 MB');
+    return { dataUrl: u, mediaType: m[1], data: m[2] };
+  });
+}
+
+/** Describe attached screenshots as text, so every flow (answers, fixes, new apps) can use them. */
+async function describeImages(images, userContent) {
+  const text = await complete({
+    system: 'You read screenshots for a developer using a cloud hosting platform. Describe what the image shows in detail. Transcribe any error messages, logs, code, URLs and settings exactly. If it is a UI or design, describe the layout, text and colours. Be factual and concise.',
+    messages: [{ role: 'user', content: [...images.map((i) => ({ type: 'image', mediaType: i.mediaType, data: i.data })), { type: 'text', text: `The developer wrote: ${userContent || '(nothing)'}\nDescribe the attached image${images.length > 1 ? 's' : ''}.` }] }],
+    maxTokens: 1200, temperature: 0
+  });
+  return `${userContent || 'See the attached image.'}\n\n[Attached ${images.length > 1 ? `${images.length} images` : 'image'}, described:]\n${text.trim()}`;
+}
+
 async function answerQuestion(thread, userContent, history) {
   const services = projectServices(thread.project_id);
   const crashedServices = services.filter((s) => s.status === 'crashed');
@@ -348,7 +371,12 @@ async function answerQuestion(thread, userContent, history) {
     }
   }
 
-  const system = `You are the Morline assistant, built into the Morline cloud platform. You help developers deploy, debug and configure services, databases, variables and domains.
+  const broken = latestBrokenDeployment(thread.project_id, null);
+  const failureLogs = broken ? String(collectLogs(broken.id) || '').slice(-3500) : '';
+
+  const system = `You are the Morline assistant, built into the Morline cloud platform, so you always have access to this project: never say you lack access to the platform, and never tell the user to deploy elsewhere.
+
+What you can actually do: answer questions using the status and logs below; write or change code (the user applies a diff card; works for apps deployed from GitHub or generated here); build new apps; and, as action cards the user applies, add a PostgreSQL, MongoDB or Redis database and connect it to a service, give a service a public URL, redeploy and restart. When asked what you can do, list exactly these. You cannot buy domains or edit DNS (a custom domain is added in the service's Domains tab), run queries on a database, read secret values, delete services or change billing.
 
 You can also build things: if the developer asks for a new app or API, or for a change to a service's code, or reports that something broke, you do it: you write the code and Morline shows the exact diff as a card they can apply. Because that card is the confirmation, never ask "would you like me to...", "do you want me to proceed" or "shall I apply this". When they ask for something, do it. Ask a question only when you truly lack information you cannot work out yourself. In a plain answer don't claim to have changed anything.
 
@@ -356,7 +384,7 @@ Current platform context:
 - Project ID: ${thread.project_id}
 - Services: ${JSON.stringify(services.map((s) => ({ name: s.name, kind: s.kind, status: s.status, domain: s.primary_domain, repo: s.source_repo || null })))}
 - Recent deployment failures: ${JSON.stringify(recentErrors)}
-${crashedLogs ? `\nRecent crash logs:\n${crashedLogs}` : ''}
+${failureLogs ? `\nLogs of the latest failed deployment (${broken.service_name}):\n${failureLogs}\n` : ''}${crashedLogs ? `\nRecent crash logs:\n${crashedLogs}` : ''}
 
 Be direct, concise and technically accurate. Explain root causes and give concrete fixes. Use clean markdown with code blocks where they help.`;
 
@@ -495,6 +523,24 @@ async function proposeCodeChange({ thread, team, route, userContent, history, pr
   };
 }
 
+/** Something done to a service that is not a code change: public URL, redeploy, restart, add a database. */
+function proposePlatformOp({ thread, route }) {
+  const services = projectServices(thread.project_id);
+  const service = services.find((s) => s.id === route.serviceId) || (services.length === 1 ? services[0] : null);
+  if (!service) return { text: `Which service? ${services.map((s) => s.name).join(', ') || 'This project has no services yet.'}` };
+  const op = normalizeOp({ op: route.op, kind: route.kind });
+  const d = describeOp(op, service.name);
+  const tail = op.op === 'add_database' ? ' Once it is connected, ask me to use it in the code and I will update the app.' : '';
+  return {
+    text: `${d.description}.${tail}`,
+    actions: [{
+      type: 'platform_op', title: d.title, description: d.description, risk: 'medium', reversible: d.reversible,
+      targets: [{ type: 'service', id: service.id, label: service.name }],
+      payload: { ...op, serviceId: service.id }, diff: []
+    }]
+  };
+}
+
 /** "Fix and deploy": read the failed deployment's logs and propose a code change that fixes it. */
 async function proposeFix({ thread, team, deploymentId, userContent, history, progress }) {
   const dep = queryOne(`
@@ -503,7 +549,7 @@ async function proposeFix({ thread, team, deploymentId, userContent, history, pr
     JOIN environments e ON e.id = s.environment_id
     WHERE d.id = ?
   `, deploymentId);
-  if (!dep || dep.project_id !== thread.project_id) return { text: 'I could not find that deployment in this project.' };
+  if (!dep || dep.project_id !== thread.project_id) return { text: 'That deployment no longer exists, most likely because its service was deleted, so there is nothing to fix.' };
 
   progress(`Reading the logs of ${dep.service_name}`);
   const logs = collectLogs(deploymentId);
@@ -595,6 +641,7 @@ async function respond({ thread, user, userContent, context, history, progress }
 
   try {
     if (team && route.intent === 'build_app') return await proposeNewApp({ thread, team, userContent: message, history, progress });
+    if (team && route.intent === 'platform') return proposePlatformOp({ thread, route });
     if (team && route.intent === 'change_code') return await proposeCodeChange({ thread, team, route, userContent: message, history, progress });
   } catch (err) {
     console.error('[Assistant] build failed:', err.message);
@@ -630,7 +677,8 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     const now = new Date().toISOString();
     let thread = queryOne('SELECT * FROM assistant_threads WHERE id = ?', threadId);
 
-    const userContent = req.body?.content || req.body?.text || req.body?.message;
+    const images = parseImages(req.body?.images);
+    const userContent = req.body?.content || req.body?.text || req.body?.message || (images.length ? 'See the attached image.' : '');
     if (!userContent) throw validationError('content or text is required');
 
     const bodyProjectId = req.body?.projectId || null;
@@ -673,7 +721,10 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
     execute(`
       INSERT INTO assistant_messages (id, thread_id, role, status, content, context, author, created_at)
       VALUES (?, ?, 'user', 'done', ?, ?, ?, ?)
-    `, userMsgId, threadId, userContent, JSON.stringify(context), JSON.stringify(mapUserRef(req.user)), now);
+    `, userMsgId, threadId, userContent, JSON.stringify([
+      ...(Array.isArray(context) ? context : context ? [context] : []),
+      ...images.map((img, n) => ({ type: 'image', label: `Image ${n + 1}`, dataUrl: img.dataUrl }))
+    ]), JSON.stringify(mapUserRef(req.user)), now);
     execute('UPDATE assistant_threads SET last_activity_at = ? WHERE id = ?', now, threadId);
     const userMessageMapped = mapMessage(queryOne('SELECT * FROM assistant_messages WHERE id = ?', userMsgId));
 
@@ -689,11 +740,13 @@ router.post('/assistant/threads/:threadId/messages', async (req, res, next) => {
 
     const startedAt = Date.now();
     const steps = [];
+    const progressFirst = (text) => { steps.push({ text, icon: 'lucide:eye' }); send('status', { text, icon: 'lucide:eye' }); };
     const isFirstMessage = history.length === 0;
     let outcome;
     try {
+      const promptContent = images.length ? await (progressFirst('Reading the image'), describeImages(images, req.body?.text || req.body?.content || '')) : userContent;
       outcome = await respond({
-        thread, user: req.user, userContent, context, history,
+        thread, user: req.user, userContent: promptContent, context, history,
         // Steps are plain strings, or { text, icon } when the module engine names a logo to show.
         progress: (text, meta) => {
           const textOf = (st) => (typeof st === 'string' ? st : st.text);

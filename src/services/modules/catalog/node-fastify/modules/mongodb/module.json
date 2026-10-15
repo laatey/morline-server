@@ -1,14 +1,57 @@
 {
-  "id": "mongodb", "name": "MongoDB", "category": "data", "icon": "mongodb", "order": 21,
+  "id": "mongodb",
+  "name": "MongoDB",
+  "category": "data",
+  "icon": "mongodb",
+  "order": 21,
   "summary": "MongoDB client as app.mongo (app.mongo.db().collection('name')).",
-  "label": { "add": "Connecting MongoDB", "remove": "Removing MongoDB" },
-  "addons": ["mongodb"],
-  "wiring": { "phase": "data", "imports": ["import mongodb from './plugins/mongodb.js';"], "register": ["await app.register(mongodb);"] },
-  "readme": { "features": ["- **MongoDB**: client at `app.mongo`; use `app.mongo.db().collection('name')`"] },
-  "env": [
-    { "key": "MONGODB_URL", "required": true, "provisioned": true, "description": "MongoDB connection string (set automatically when a database is attached in Morline)" },
-    { "key": "MONGODB_DB", "required": false, "description": "Database name, if it is not part of the connection string" }
+  "label": {
+    "add": "Connecting MongoDB",
+    "remove": "Removing MongoDB"
+  },
+  "addons": [
+    "mongodb"
   ],
-  "deps": { "mongodb": "^6.0.0", "fastify-plugin": "^5.0.0" },
-  "files": [{ "from": "mongodb.js", "to": "src/plugins/mongodb.js" }]
+  "wiring": {
+    "phase": "data",
+    "imports": [
+      "import mongodb from './plugins/mongodb.js';"
+    ],
+    "register": [
+      "await app.register(mongodb);"
+    ]
+  },
+  "readme": {
+    "features": [
+      "- **MongoDB**: client at `app.mongo`; use `app.mongo.db().collection('name')`"
+    ]
+  },
+  "env": [
+    {
+      "key": "MONGODB_URL",
+      "required": true,
+      "provisioned": true,
+      "description": "MongoDB connection string (set automatically when a database is attached in Morline)"
+    },
+    {
+      "key": "MONGODB_DB",
+      "required": false,
+      "description": "Database name, if it is not part of the connection string"
+    },
+    {
+      "key": "MONGODB_POOL_MAX",
+      "required": false,
+      "description": "Maximum connections in the pool (default 10)"
+    }
+  ],
+  "deps": {
+    "mongodb": "^6.0.0",
+    "fastify-plugin": "^5.0.0"
+  },
+  "files": [
+    {
+      "from": "mongodb.js",
+      "to": "src/plugins/mongodb.js"
+    }
+  ]
 }

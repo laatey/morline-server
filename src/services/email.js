@@ -96,7 +96,7 @@ function layout({ title, preheader, icon = 'info', heading, subtext, cta, table,
     <tr><td class="t1" style="padding:0 0 24px;font-family:${FONT};font-size:28px;line-height:1.3;font-weight:500;letter-spacing:-0.3px;color:#1f2328;">${esc(title)}</td></tr>
     <tr><td class="card" style="border:1px solid #d1d9e0;border-radius:8px;background-color:#ffffff;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td class="pad" align="center" style="padding:44px 32px 40px;">
+        <tr><td class="pad" align="center" style="padding:36px 32px 36px;">
           <img src="${esc(ASSET(`email-icon-${icon}.png`))}" width="64" height="64" alt="" style="display:block;border:0;margin:0 auto 22px;">
           <div class="t1" style="font-family:${FONT};font-size:24px;line-height:1.3;font-weight:600;color:#1f2328;">${esc(heading)}</div>
           ${subtext ? `<div class="t2" style="margin:12px auto 0;max-width:420px;font-family:${FONT};font-size:14px;line-height:1.6;color:#59636e;">${esc(subtext)}</div>` : ''}
@@ -180,16 +180,14 @@ const NOTICE = {
 export async function sendNotificationEmail({ to, type, title, body, url, projectName, item }) {
   const n = NOTICE[type] || { tone: 'info', heading: title, cta: 'Open in Morline' };
   const tone = TONES[n.tone] || TONES.info;
+  // Short on purpose: what happened, to what, and a button. The details (and the error) are in Morline.
   const mail = layout({
     title: projectName ? `[${projectName}] ${title}` : title,
-    preheader: body ? String(body).slice(0, 110) : title,
+    preheader: title,
     icon: tone.icon,
     heading: n.heading,
-    ...(n.headers ? {} : { subtext: body }),
+    subtext: item || (n.headers ? undefined : body),
     cta: url ? { label: n.cta, url } : undefined,
-    ...(n.headers && item ? { table: { headers: n.headers, rows: [[{ tone: n.tone }, item, body || '']] } } : {}),
-    ...(n.headers && !item ? { subtext: body } : {}),
-    ...(n.note ? { note: n.note } : {}),
     footer: 'You are receiving this because email notifications are on.'
   });
   return send({ to, subject: title, ...mail });

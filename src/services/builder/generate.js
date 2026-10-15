@@ -20,10 +20,11 @@ const asHistory = (history = []) => history
 // --- Intent -------------------------------------------------------------------------------
 
 const INTENT_SYSTEM = `You route messages sent to the Morline assistant. Reply with ONLY a JSON object:
-{"intent":"answer"|"build_app"|"change_code","serviceId":string|null,"reason":string}
+{"intent":"answer"|"build_app"|"change_code"|"platform","serviceId":string|null,"op":"expose"|"redeploy"|"restart"|"add_database"|null,"kind":"postgres"|"mongodb"|"redis"|null,"reason":string}
 
 - "build_app": the user wants a NEW application, API, website or service created and hosted for them.
 - "change_code": the user wants to modify the source code of an EXISTING service (add a feature, fix a bug, change behaviour, update text). Set serviceId to the id of the service they mean; if they didn't say which and several could fit, use null.
+- "platform": the user wants something DONE to an existing service that is not a code change. op "expose" = give it a public URL / make it reachable from the internet / assign it a domain; "redeploy" = deploy again; "restart" = restart it; "add_database" = create a database (kind postgres, mongodb or redis) and connect it to the service. Set serviceId like change_code. If the user asks for a database AND code that uses it, choose "platform" with add_database first.
 - "answer": anything else (questions, explanations, debugging advice, configuration help).
 
 Only choose build_app or change_code when the user is clearly asking for code to be written or changed. A report that a service crashed, failed to build or errors out, and a reply like "yes" or "do it" to a proposed change, both mean change_code: the user wants it fixed, so do not choose "answer".`;
@@ -40,9 +41,10 @@ export async function classifyIntent({ message, services, history, preferredServ
     temperature: 0,
     fast: true
   });
-  const intent = ['build_app', 'change_code'].includes(out.intent) ? out.intent : 'answer';
+  const ops = ['expose', 'redeploy', 'restart', 'add_database'];
+  const intent = ['build_app', 'change_code'].includes(out.intent) ? out.intent : (out.intent === 'platform' && ops.includes(out.op) ? 'platform' : 'answer');
   const serviceId = services.some((s) => s.id === out.serviceId) ? out.serviceId : (preferredServiceId || null);
-  return { intent, serviceId };
+  return { intent, serviceId, ...(intent === 'platform' ? { op: out.op, kind: out.kind } : {}) };
 }
 
 // --- New app ------------------------------------------------------------------------------
@@ -78,8 +80,16 @@ Rules for the plan: "volume" is only for apps that store files or data; use the 
  */
 export async function generateNewApp(args) {
   if (moduleEngineOn()) {
-    const out = await (await getModuleBuilder()).generateNewApp(args);
-    if (!out.fallback) return out;
+    try {
+      const out = await (await getModuleBuilder()).generateNewApp(args);
+      if (!out.fallback) return out;
+    } catch (err) {
+      // A template or patch problem is ours, not something the model can fix by retrying. Never strand
+      // the user on it: build the app the original way instead.
+      if (!(err instanceof EngineError) || !['patch_conflict', 'checks_failed'].includes(err.code)) throw err;
+      console.error(`[Modules] falling back to the from-scratch builder: ${err.message}`);
+      args.onStep?.('Switching to a custom build');
+    }
   }
   return generateNewAppFromScratch(args);
 }
@@ -214,11 +224,11 @@ export async function generateChange({ prompt, repo, tree, readFile, history, on
   const known = new Set(tree.map((f) => f.path));
 
   const listing = tree.slice(0, 400).map((f) => f.path).join('\n');
-  const files = [...contents].map(([p, c]) => `=== ${p} ===\n${c}`).join('\n\n');
-  const base = [
+  const makeBase = () => [
     ...asHistory(history),
-    { role: 'user', content: `Repository: ${repo}\n\nAll files:\n${listing}\n\nRelevant file contents:\n\n${files}\n\nRequest: ${prompt}` }
+    { role: 'user', content: `Repository: ${repo}\n\nAll files:\n${listing}\n\nRelevant file contents:\n\n${[...contents].map(([p, c]) => `=== ${p} ===\n${c}`).join('\n\n')}\n\nRequest: ${prompt}` }
   ];
+  const base = makeBase();
 
   const ask = async (messages) => {
     const report = stepReporter(onStep);
@@ -301,6 +311,19 @@ export async function generateChange({ prompt, repo, tree, readFile, history, on
     }
     if (err instanceof EngineError) throw err; // user-safe: shown as is, never retried silently
     if (!text) throw err;
+    // The model named a file it was never shown (file choice missed it): read that file and ask again.
+    const missing = /^(.+?) exists but its contents were not provided/.exec(err.message)?.[1] || /^No content or edits for (.+)$/.exec(err.message)?.[1];
+    const entry = missing && !contents.has(missing) ? tree.find((f) => f.path === missing) : null;
+    if (entry) {
+      const body = await readFile(entry);
+      if (body != null) {
+        onStep(`Reading ${missing}`);
+        contents.set(missing, body);
+        ({ text, out } = await ask(makeBase()));
+        if (!out.changes.length && !(installed && hasOps(text))) return { summary: out.summary, changes: [] };
+        return await assemble(text, out);
+      }
+    }
     // One correction pass: tell the model exactly what was wrong with its output.
     onStep('Fixing a problem with the first attempt');
     ({ text, out } = await ask([...base, { role: 'assistant', content: text.slice(0, 8000) }, { role: 'user', content: `That could not be applied: ${err.message}. Fix it and reply in the same format.` }]));

@@ -61,7 +61,7 @@ export function recipientsForDeployment(deploymentId) {
   return { users: dep.created_by ? [dep.created_by] : (projectId ? adminsOfProject(projectId) : []), projectId };
 }
 
-export const projectLink = (projectId) => (projectId ? `/projects/${projectId}` : '/projects');
+export const projectLink = (projectId) => (projectId ? `/project/${projectId}` : '/projects');
 
 /**
  * A one-line, human summary of a build or deploy failure. Raw error text can be a whole Docker build

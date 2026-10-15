@@ -96,7 +96,10 @@ export class Project {
   #edit(path, fn) {
     const text = this.files.get(path);
     if (text === undefined) throw patch.conflict(path, 'the file is missing');
-    this.files.set(path, fn(text));
+    // Keep a file's own line endings: patch in LF, write back CRLF if that is what the file used.
+    const crlf = text.includes('\r\n');
+    const out = fn(crlf ? text.replace(/\r\n/g, '\n') : text);
+    this.files.set(path, crlf ? out.replace(/\r?\n/g, '\r\n') : out);
   }
 
   writeManifest() { this.files.set(MANIFEST_PATH, serializeManifest(this.manifest)); }
@@ -254,7 +257,7 @@ export class Project {
     }
     this.manifest.resources[res.name] = { db: target, fields: res.fields };
     const label = res.name.charAt(0).toUpperCase() + res.name.slice(1);
-    const step = { text: `Generating ${label} API`, icon: 'lucide:database', module: `resource:${res.name}`, op: 'add' };
+    const step = { text: `Generating ${label} API`, icon: null, module: `resource:${res.name}`, op: 'add' };
     this.steps.push(step);
     this.onStep(step.text, { icon: step.icon, module: step.module, op: 'add' });
     this.writeManifest();
@@ -269,7 +272,7 @@ export class Project {
       this.files.delete(path);
     }
     delete this.manifest.resources[name];
-    this.steps.push({ text: `Removing ${name} API`, icon: 'lucide:database', module: `resource:${name}`, op: 'remove' });
+    this.steps.push({ text: `Removing ${name} API`, icon: null, module: `resource:${name}`, op: 'remove' });
     this.writeManifest();
   }
 

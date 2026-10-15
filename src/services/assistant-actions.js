@@ -6,6 +6,7 @@ import { AppError, forbidden, notFound } from '../middleware/error-handler.js';
 import { GitHubError, withGithub, createRepoForTeam, getRepo, getBranchHead, commitFiles, createBranch, createPullRequest } from './github-repo.js';
 import { createRepoService, startDeployment, writeWorkspaceFiles, applyWorkspaceChanges } from './service-factory.js';
 import { provisionAddon, removeAddon } from './addons.js';
+import { runOp, revertOp } from './platform-ops.js';
 import { slugify } from './builder/files.js';
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
@@ -31,6 +32,7 @@ export function publicAction(row) {
     repo: p.repo, branch: p.branch, mode: p.mode, serviceId: p.serviceId, name: p.name, port: p.port,
     envVars: p.envVars, volume: p.volume, fileCount: (p.files || p.changes || []).length,
     local: p.local || undefined,
+    op: p.op, kind: p.kind,
     modules: p.modules, addons: p.addons, warnings: p.warnings, services: p.services,
     deploy: p.deploy, githubConnected: row.type === 'create_app' ? githubConnected(teamOf(row)?.team_id) : undefined
   };
@@ -319,6 +321,10 @@ async function revertModifyCode(row, user, team) {
 // --- public entry points -------------------------------------------------------------------
 
 const EXECUTORS = {
+  platform_op: {
+    apply: async (row, user) => { const p = parse(row.payload, {}); return runOp(p, p.serviceId, user.id); },
+    revert: async (row) => { const p = parse(row.payload, {}); const result = parse(row.result, {}) || {}; await revertOp(p, p.serviceId, result); return { ...result, reverted: true }; }
+  },
   create_app: { apply: runCreateApp, revert: revertCreateApp },
   modify_code: { apply: runModifyCode, revert: revertModifyCode }
 };

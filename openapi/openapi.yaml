@@ -1867,6 +1867,11 @@ paths:
               properties:
                 content: { type: string, minLength: 1, maxLength: 8000 }
                 context: { type: array, items: { $ref: "#/components/schemas/ContextRef" }, description: Items added with "+ Context" }
+                images:
+                  type: array
+                  maxItems: 4
+                  description: "Attached or pasted images as data URLs (PNG, JPEG, WebP or GIF, under 6 MB each). `content` may then be empty. The assistant reads them with a vision model; they are stored on the message context as items with type image and a dataUrl."
+                  items: { type: string, example: "data:image/jpeg;base64,/9j/4AAQ..." }
       responses:
         "200": { description: SSE stream, content: { text/event-stream: { schema: { $ref: "#/components/schemas/Message" } } } }
         "202":
@@ -2855,7 +2860,7 @@ components:
         threadId: { type: string }
         type:
           type: string
-          enum: [set_variables, delete_variables, create_service, update_service_settings, delete_service, create_connection, delete_connection, redeploy, rollback, restart_service, add_domain, scale_service, create_app, modify_code]
+          enum: [set_variables, delete_variables, create_service, update_service_settings, delete_service, create_connection, delete_connection, redeploy, rollback, restart_service, add_domain, scale_service, create_app, modify_code, platform_op]
         status: { type: string, enum: [proposed, applying, applied, partially_applied, failed, dismissed, reverted, stale] }
         title: { type: string, example: "Set DATABASE_URL on api and redeploy" }
         description: { type: string }
@@ -2876,6 +2881,8 @@ components:
                 properties:
                   kind: { type: string, enum: [postgres, mongodb, redis] }
                   env: { type: string, example: DATABASE_URL, description: Variable the app receives }
+            op: { type: string, enum: [expose, redeploy, restart, add_database], description: "platform_op: what to do to the service" }
+            kind: { type: string, enum: [postgres, mongodb, redis], description: "platform_op add_database" }
             warnings: { type: array, items: { type: string } }
             services: { type: array, items: { type: object, properties: { name: { type: string }, start: { type: string } } }, description: "Extra processes the app needs (for example a worker); informational" }
         deployment:

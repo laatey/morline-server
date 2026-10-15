@@ -1,0 +1,2 @@
+# The catalog's anchors match exact lines, so keep every file LF even on Windows checkouts.
+* text eol=lf

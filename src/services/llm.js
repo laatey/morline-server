@@ -32,6 +32,16 @@ async function readSse(res, onData) {
 
 const isEventStream = (res) => (res.headers.get('content-type') || '').includes('text/event-stream');
 
+// Message content is a string, or a list of parts: { type: 'text', text } and { type: 'image', mediaType, data (base64) }.
+const toOpenAI = (m) => (typeof m.content === 'string' ? m : {
+  ...m,
+  content: m.content.map((p) => (p.type === 'image' ? { type: 'image_url', image_url: { url: `data:${p.mediaType};base64,${p.data}` } } : p))
+});
+const toAnthropic = (m) => (typeof m.content === 'string' ? m : {
+  ...m,
+  content: m.content.map((p) => (p.type === 'image' ? { type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.data } } : p))
+});
+
 async function chatCompletions(baseUrl, key, model, system, messages, { maxTokens, temperature, onText }) {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -41,7 +51,7 @@ async function chatCompletions(baseUrl, key, model, system, messages, { maxToken
       temperature,
       max_tokens: maxTokens,
       stream: Boolean(onText),
-      messages: [{ role: 'system', content: system }, ...messages]
+      messages: [{ role: 'system', content: system }, ...messages.map(toOpenAI)]
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS)
   });
@@ -81,7 +91,7 @@ async function anthropic(system, messages, { maxTokens, temperature, onText }, t
     body: JSON.stringify({
       model: target.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
       system,
-      messages,
+      messages: messages.map(toAnthropic),
       temperature,
       max_tokens: maxTokens,
       stream: Boolean(onText)

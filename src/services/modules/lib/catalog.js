@@ -19,7 +19,8 @@ async function readTree(dirUrl) {
   for (const e of entries) {
     if (!e.isFile()) continue;
     const full = path.join(e.parentPath, e.name);
-    out.set(path.relative(root, full).split(path.sep).join('/'), await readFile(full, 'utf8'));
+    // Templates are LF: a Windows checkout can turn them into CRLF, which breaks the exact-line patch anchors.
+    out.set(path.relative(root, full).split(path.sep).join('/'), (await readFile(full, 'utf8')).replace(/\r\n?/g, '\n'));
   }
   return out;
 }
