@@ -29,11 +29,6 @@ small{display:block;margin-top:2rem;opacity:.45;font-size:.8rem}</style></head><
 }
 
 export function reverseProxyMiddleware(req, res, next) {
-  // Never proxy API routes
-  if (req.path.startsWith('/v1') || req.path === '/health') {
-    return next();
-  }
-
   // Check path-based proxying: /proxy/:serviceId/*
   const proxyMatch = req.path.match(/^\/proxy\/([^/]+)(\/.*)?$/);
   let targetServiceId = null;
