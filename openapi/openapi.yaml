@@ -50,56 +50,8 @@ tags:
   - name: Notifications
   - name: Databases
   - name: Search
-  - name: AI Gateway
 
 paths:
-  /ai/health:
-    get:
-      tags: [AI Gateway]
-      summary: Check the protected MoreCode AI gateway
-      servers: [{ url: https://api.morline.space }]
-      security: [{ aiGatewayKey: [] }]
-      responses:
-        "200": { description: Gateway is ready }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "503": { description: Gateway is not configured }
-
-  /ai/v1/models:
-    get:
-      tags: [AI Gateway]
-      summary: List configured named models
-      servers: [{ url: https://api.morline.space }]
-      security: [{ aiGatewayKey: [] }]
-      responses:
-        "200": { description: Model list }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /ai/v1/messages:
-    post:
-      tags: [AI Gateway]
-      summary: Anthropic-compatible streaming messages endpoint for MoreCode
-      description: Upstream credentials remain on Morline. The proxy may select another configured upstream only before a response starts.
-      servers: [{ url: https://api.morline.space }]
-      security: [{ aiGatewayKey: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [model, messages]
-              properties:
-                model: { type: string, example: anthropic/claude-sonnet-5 }
-                stream: { type: boolean, default: true }
-                messages: { type: array, items: { type: object, additionalProperties: true } }
-      responses:
-        "200":
-          description: Anthropic JSON or server-sent event stream, passed through unchanged
-          content: { text/event-stream: { schema: { type: string } }, application/json: { schema: { type: object } } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "429": { $ref: "#/components/responses/RateLimited" }
-        "503": { description: No configured upstream can currently serve the request }
-
   # ───────────────────────────── AUTH ─────────────────────────────
   /auth/signup:
     post:
@@ -2107,11 +2059,6 @@ components:
       type: http
       scheme: bearer
       description: Access token from `Session.accessToken`.
-    aiGatewayKey:
-      type: apiKey
-      in: header
-      name: X-API-Key
-      description: Dedicated MORLINE_AI_GATEWAY_CLIENT_KEY. This is not a Morline session token or an upstream provider key.
 
   parameters:
     teamId: { name: teamId, in: path, required: true, schema: { type: string } }

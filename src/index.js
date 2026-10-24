@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
-import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL, MORLINE_AI_GATEWAY_CLIENT_KEY, MORLINE_AI_GATEWAY_UPSTREAMS } from './config.js';
+import { PORT, HOST, DATA_DIR, PUBLIC_URL, FRONTEND_URL } from './config.js';
 import { initDb } from './db/index.js';
 import { backfillAppTypes } from './engine/app-type.js';
 import { recoverBackups } from './engine/database-manager.js';
@@ -38,8 +38,6 @@ import searchRouter from './routes/search.js';
 import assistantRouter from './routes/assistant.js';
 import githubRouter from './routes/github.js';
 import templatesRouter from './routes/templates.js';
-import { createAiGatewayRouter } from './routes/ai-gateway.js';
-import { AiGatewayPool, loadGatewayUpstreams } from './services/ai-gateway-pool.js';
 
 // Initialize Database & Seeds
 initDb();
@@ -92,7 +90,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-Id', 'Accept']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept']
 }));
 
 // Middleware
@@ -102,23 +100,6 @@ app.use(requestIdMiddleware);
 // rawBody is kept for GitHub webhook signature verification.
 app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Separate from the Morline dashboard API: this accepts a dedicated key for desktop clients and
-// keeps every upstream URL/key in server environment variables.
-let aiGatewayPool;
-try {
-  aiGatewayPool = new AiGatewayPool(loadGatewayUpstreams(MORLINE_AI_GATEWAY_UPSTREAMS));
-} catch (err) {
-  console.error(`[AI Gateway] Invalid upstream configuration: ${err.message}`);
-  aiGatewayPool = new AiGatewayPool([]);
-}
-app.use('/ai', rateLimit({
-  windowMs: 60_000,
-  max: Number(process.env.MORLINE_AI_GATEWAY_RATE_LIMIT_PER_MIN) || 120,
-  key: (req) => req.get('x-api-key') || req.ip,
-  message: 'Too many AI gateway requests, slow down'
-}));
-app.use('/ai', createAiGatewayRouter({ clientKey: MORLINE_AI_GATEWAY_CLIENT_KEY, pool: aiGatewayPool }));
 
 // Static avatars
 app.use('/avatars', express.static(path.join(DATA_DIR, 'avatars')));

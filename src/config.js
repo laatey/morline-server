@@ -81,10 +81,6 @@ export const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || 'google/gemini-2
 // Optional cheaper model for small jobs (routing a message, naming a chat). Falls back to AI_GATEWAY_MODEL.
 export const AI_GATEWAY_FAST_MODEL = process.env.AI_GATEWAY_FAST_MODEL || null;
 
-// Public client key plus server-only upstream pool used by /ai. Neither has a fallback value.
-export const MORLINE_AI_GATEWAY_CLIENT_KEY = process.env.MORLINE_AI_GATEWAY_CLIENT_KEY || null;
-export const MORLINE_AI_GATEWAY_UPSTREAMS = process.env.MORLINE_AI_GATEWAY_UPSTREAMS || null;
-
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
 export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
